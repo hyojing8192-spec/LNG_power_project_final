@@ -26,6 +26,7 @@ from smp_collector import collect_smp, _get_target_dates
 from economics_engine import build_hourly_table, get_elec_price
 from anomaly_detector import calc_smp_thresholds
 from ml_predictor import load_data, load_models, predict_day
+from guidance_generator import generate_full_guidance
 from config import DEFAULT_LNG_PRICE, DEFAULT_LNG_HEAT, FALLBACK_EXCHANGE_RATE, MODE_LABELS
 
 
@@ -96,84 +97,21 @@ def run_analysis(target_date: date, lng_price: float, is_spot: bool = False):
         smp_high_threshold=thresholds["smp_high"],
     )
 
-    # ── 4. 결과 출력 ─────────────────────────────────────────
-    print(f"\n[4/4] 분석 결과")
+    # ── 4. 가이던스 생성 (F5) ──────────────────────────────────
+    print("\n[4/4] 가동 가이던스 생성 중...")
 
-    print(f"\n  동적 임계값:")
-    print(f"    LNG발전 BEP 임계 SMP: {thresholds['smp_low']:.2f} 원/kWh (이하 > 감발 검토)")
-    print(f"    기력발전 BEP 임계 SMP: {thresholds['smp_high']:.2f} 원/kWh (이상 > 점화 검토)")
+    guidance = generate_full_guidance(
+        target_date=target_date,
+        hourly_df=hourly_df,
+        smp_series=smp_series,
+        thresholds=thresholds,
+        lng_price=lng_price,
+        exchange_rate=exchange_rate,
+        lng_heat=lng_heat,
+        is_spot=is_spot,
+    )
 
-    # 시간별 요약
-    print(f"\n  LNG가격: {lng_price} $/MMBtu -- BEP > {lng_price}이면 가동(O), BEP < {lng_price}이면 정지(X)")
-    print(f"\n  {'시간':>5}  {'SMP':>7}  {'BEP_1기':>8}  {'BEP_2기저':>9}  {'BEP_2기':>8}  {'최적모드':>8}  {'경제성(억)':>10}  {'비고'}")
-    print(f"  {'-'*5}  {'-'*7}  {'-'*8}  {'-'*9}  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*15}")
-
-    for _, row in hourly_df.iterrows():
-        hour_str = row["시간"]
-        smp = row["SMP(원/kWh)"]
-        mode = row["최적모드"]
-
-        bep_1 = row.get("BEP_1기($/MMBtu)", float("nan"))
-        bep_low = row.get("BEP_2기저부하($/MMBtu)", float("nan"))
-        bep_2 = row.get("BEP_2기($/MMBtu)", float("nan"))
-
-        # 최적모드의 경제성(억)
-        econ_col = f"경제성(억)_{mode}" if mode != "정지" else "경제성(억)_1기"
-        econ_bil = row.get(econ_col, 0)
-
-        def fmt_bep(v):
-            if v != v: return "   -   "  # NaN
-            marker = "O" if v > lng_price else "X"
-            return f"{v:>6.2f}{marker}"
-
-        # 비고
-        note = ""
-        if smp <= 0:
-            note = "[!] SMP 제로"
-        elif smp < thresholds["smp_low"]:
-            note = "[!] 감발 검토"
-        elif smp >= thresholds["smp_high"]:
-            steam_bep = row.get("기력BEP_사용단가($/MMBtu)", None)
-            if steam_bep and steam_bep == steam_bep:
-                note = f"[*] 기력 BEP {steam_bep:.1f}"
-            else:
-                note = "[*] 기력 점화"
-
-        print(f"  {hour_str:>5}  {smp:>6.1f}  {fmt_bep(bep_1)}  {fmt_bep(bep_low)}  {fmt_bep(bep_2)}  {mode:>8}  {econ_bil:>9.3f}  {note}")
-
-    # 일일 요약
-    print(f"\n  {'='*65}")
-    print(f"  일일 요약")
-    print(f"  {'='*65}")
-
-    best_modes = hourly_df["최적모드"].value_counts()
-    print(f"  최적모드 분포: ", end="")
-    for mode, count in best_modes.items():
-        print(f"{mode} {count}시간  ", end="")
-    print()
-
-    for label in ["1기", "2기저부하", "2기"]:
-        col = f"경제성(억)_{label}"
-        if col in hourly_df.columns:
-            total = hourly_df[col].sum()
-            print(f"  {label} 일일 경제성 합계: {total:.3f} 억원")
-
-    # SMP 이상구간
-    low_hours = [i for i, s in enumerate(smp_series) if 0 < s < thresholds["smp_low"]]
-    high_hours = [i for i, s in enumerate(smp_series) if s >= thresholds["smp_high"]]
-    zero_hours = [i for i, s in enumerate(smp_series) if s <= 0]
-
-    if zero_hours:
-        print(f"\n  [!] SMP 제로 구간: {[f'{h}시' for h in zero_hours]}")
-    if low_hours:
-        print(f"  [!] SMP 경제성 한계 구간 (<{thresholds['smp_low']:.0f}원): {[f'{h}시' for h in low_hours]}")
-    if high_hours:
-        print(f"  [*] 기력발전 점화 검토 구간 (≥{thresholds['smp_high']:.0f}원): {[f'{h}시' for h in high_hours]}")
-
-    if not (zero_hours or low_hours or high_hours):
-        print(f"\n  SMP 정상 범위 -이상구간 없음")
-
-    print(f"\n{'='*65}\n")
+    print(guidance["text_report"])
 
     # CSV 저장
     out_path = ROOT / "data" / f"경제성분석_{target_date}.csv"

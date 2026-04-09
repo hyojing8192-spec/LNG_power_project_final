@@ -5,3 +5,6 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+data/kakao_token.json
+data/test_chart.png
+data/kmos_coords.json

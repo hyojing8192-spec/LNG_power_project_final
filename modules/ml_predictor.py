@@ -25,6 +25,12 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import KFold, TimeSeriesSplit, cross_val_score
 from xgboost import XGBRegressor
 
+try:
+    from imblearn.over_sampling import SMOTENC, SMOTE
+    _HAS_SMOTE = True
+except ImportError:
+    _HAS_SMOTE = False
+
 warnings.filterwarnings("ignore")
 
 from config import (
@@ -322,14 +328,68 @@ def train_all_models(df: pd.DataFrame) -> dict:
     for mode in MODES:
         subset_tr = df_train[df_train["mode"] == mode].dropna(subset=FEATURE_COLS)
 
-        # low2gi: train 구간만으로 경계 보강 (테스트 행 제외)
-        # v9 이후 저부하 388행 추가로 충분할 수 있으나 안전망 유지
-        if mode == "low2gi" and len(subset_tr) < 100:
-            border = df_train[
-                (df_train["lng_gen"] >= 370_000) & (df_train["lng_gen"] <= 450_000)
-            ].dropna(subset=FEATURE_COLS)
-            subset_tr = pd.concat([subset_tr, border]).drop_duplicates()
-            print(f"[INFO] low2gi train 보강: {len(subset_tr)}행 (380k~440k 경계구간, train만)")
+        # low2gi: 경계구간 보강 + SMOTE 오버샘플링
+        if mode == "low2gi":
+            n_before = len(subset_tr)
+
+            # 1단계: 경계구간 데이터 합침 (기존 로직 유지)
+            if n_before < 100:
+                border = df_train[
+                    (df_train["lng_gen"] >= 370_000) & (df_train["lng_gen"] <= 450_000)
+                ].dropna(subset=FEATURE_COLS)
+                subset_tr = pd.concat([subset_tr, border]).drop_duplicates()
+                print(f"[INFO] low2gi 경계구간 보강: {n_before} -> {len(subset_tr)}행")
+
+            # 2단계: SMOTE 오버샘플링 (다른 모드 대비 부족분 보충)
+            n_1gi = len(df_train[df_train["mode"] == "1gi"])
+            n_2gi = len(df_train[df_train["mode"] == "2gi"])
+            target_count = max(n_1gi, n_2gi)
+
+            if _HAS_SMOTE and len(subset_tr) < target_count * 0.5 and len(subset_tr) >= 10:
+                n_low2gi = len(subset_tr)
+                print(f"[INFO] low2gi SMOTE 적용: {n_low2gi}행 -> 목표 {target_count}행 "
+                      f"(1기:{n_1gi}, 2기:{n_2gi})")
+                try:
+                    # SMOTE용 더미 라벨 (회귀이므로 타깃 구간을 범주화)
+                    X_smote = subset_tr[FEATURE_COLS].copy()
+                    # 효율 기준으로 2구간 분할 (SMOTE는 최소 2클래스 필요)
+                    eff_col = "efficiency" if "efficiency" in subset_tr.columns else None
+                    if eff_col and subset_tr[eff_col].nunique() > 1:
+                        median_eff = subset_tr[eff_col].median()
+                        y_label = (subset_tr[eff_col] >= median_eff).astype(int)
+                    else:
+                        y_label = pd.Series(0, index=subset_tr.index)
+                        y_label.iloc[::2] = 1  # 교대로 라벨 부여
+
+                    # 소수 클래스가 k_neighbors 미만이면 k 조정
+                    min_class_count = y_label.value_counts().min()
+                    k_neighbors = min(5, min_class_count - 1) if min_class_count > 1 else 1
+
+                    if k_neighbors >= 1 and y_label.nunique() >= 2:
+                        smote = SMOTE(
+                            sampling_strategy="auto",
+                            k_neighbors=k_neighbors,
+                            random_state=42,
+                        )
+                        # 피처 + 타깃(숫자만) 결합하여 오버샘플링
+                        target_cols = [c for c in ["export", "import", "efficiency"]
+                                       if c in subset_tr.columns]
+                        smote_cols = FEATURE_COLS + target_cols
+                        X_all = subset_tr[smote_cols].copy()
+                        # 숫자 변환 보장
+                        for c in X_all.columns:
+                            X_all[c] = pd.to_numeric(X_all[c], errors="coerce")
+                        X_all = X_all.fillna(0)
+
+                        X_resampled, _ = smote.fit_resample(X_all, y_label)
+
+                        subset_tr = pd.DataFrame(X_resampled, columns=smote_cols)
+                        subset_tr["mode"] = "low2gi"
+                        print(f"[INFO] low2gi SMOTE 완료: {len(subset_tr)}행")
+                    else:
+                        print(f"[INFO] low2gi SMOTE 스킵 (클래스 부족: k={k_neighbors})")
+                except Exception as e:
+                    print(f"[WARN] low2gi SMOTE 실패, 기존 데이터로 진행: {e}")
 
         subset_te = df_test[df_test["mode"] == mode].dropna(subset=FEATURE_COLS)
 

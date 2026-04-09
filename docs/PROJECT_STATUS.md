@@ -139,9 +139,9 @@ LNG발전 가동경제성 자동 판단 시스템
 | F2. ML 예측 | `ml_predictor.py` | ✅ 완료 | XGBoost, 월별 stratified CV |
 | F3. 경제성 계산 | `economics_engine.py` | ✅ 완료 | 기력발전 BEP 추가 완료 |
 | F4. 이상치 탐지 | `anomaly_detector.py` | ✅ 완료 | 동적 임계값·3단계 분류 추가 |
-| F5. 가이던스 생성 | — | ⬜ 미착수 | |
-| F6. 자동 전파 | — | ⬜ 미착수 | |
-| F7. 운영 관리 | — | ⬜ 미착수 | |
+| F5. 가이던스 생성 | `guidance_generator.py` | ✅ 완료 | F5.1~F5.3 구현, run_daily_analysis 통합 |
+| F6. 자동 전파 | `mail_sender.py` | ✅ 완료 | Gmail SMTP, 정기+긴급 메일, config.py에 설정 |
+| F7. 운영 관리 | `run_scheduler.py` | ✅ 완료 | APScheduler 17:30~19:30, 통합 로그 |
 
 ---
 

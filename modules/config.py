@@ -6,8 +6,12 @@ config.py
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # ── 경로 ──────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent   # 과제_최종/
@@ -96,5 +100,23 @@ ML_TEST_FRACTION = 0.2
 DEFAULT_LNG_PRICE = 11.0       # $/MMBtu
 DEFAULT_LNG_HEAT  = 9.107      # Mcal/Nm³
 FALLBACK_EXCHANGE_RATE = 1350  # 원/$
-BOK_API_KEY = ""               # 한국은행 API 키 (없으면 폴백 환율 사용)
-DATA_GO_KR_API_KEY = ""        # 공공데이터포털 API 키 (data.go.kr 가입 후 발급)
+BOK_API_KEY = os.getenv("BOK_API_KEY", "")
+DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY", "")
+
+# ── 메일 설정 (F6) ───────────────────────────────────────────
+# .env 파일에 설정:
+#   MAIL_SENDER_EMAIL=your.email@gmail.com
+#   MAIL_SENDER_PASSWORD=abcdefghijklmnop
+#   MAIL_RECIPIENTS=user1@company.com,user2@company.com
+MAIL_SMTP_SERVER   = "smtp.gmail.com"
+MAIL_SMTP_PORT     = 587
+MAIL_SENDER_EMAIL    = os.getenv("MAIL_SENDER_EMAIL", "")
+MAIL_SENDER_PASSWORD = os.getenv("MAIL_SENDER_PASSWORD", "")
+MAIL_RECIPIENTS      = [
+    r.strip() for r in os.getenv("MAIL_RECIPIENTS", "").split(",") if r.strip()
+]
+
+# ── 카카오톡 설정 (F6) ───────────────────────────────────────
+# https://developers.kakao.com 에서 앱 생성 후 REST API 키 확인
+KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY", "")
+KAKAO_CLIENT_SECRET = os.getenv("KAKAO_CLIENT_SECRET", "")

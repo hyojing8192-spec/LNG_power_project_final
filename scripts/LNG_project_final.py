@@ -33,6 +33,7 @@ from anomaly_detector import (
 )
 from ml_predictor import load_data, load_models, predict_day, retrain
 from smp_collector import load_cached_smp, list_cached_dates
+from guidance_generator import generate_full_guidance
 
 # ──────────────────────────────────────────────────────────────
 # 페이지 설정
@@ -135,8 +136,8 @@ st.sidebar.caption(f"SMP 소스: **{smp_source}**")
 # ──────────────────────────────────────────────────────────────
 # 탭 레이아웃
 # ──────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 경제성 분석", "🔍 이상구간 탐지", "🤖 ML 모델 성능", "📁 원시 데이터"
+tab1, tab5, tab2, tab3, tab4 = st.tabs([
+    "📈 경제성 분석", "📋 가동 가이던스", "🔍 이상구간 탐지", "🤖 ML 모델 성능", "📁 원시 데이터"
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -270,6 +271,401 @@ with tab1:
 
     else:
         st.warning("데이터를 로드하지 못했습니다. 데이터.csv 파일을 확인하세요.")
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 5: 가동 가이던스 (F5)
+# ══════════════════════════════════════════════════════════════
+
+def _build_guidance_chart(
+    hours: list[int],
+    plan_data: list[dict],
+    smp_list: list[float],
+    hourly_table: pd.DataFrame,
+    lng_price_val: float,
+    thresholds_val: dict,
+    title: str,
+):
+    """SMP 꺾은선 + BEP 막대 + LNG가격 점선 복합 차트 생성."""
+    from plotly.subplots import make_subplots
+
+    x_labels = [f"{h:02d}시" for h in hours]
+    smp_vals = [smp_list[h] for h in hours]
+
+    # 최적모드 BEP 추출
+    bep_vals = []
+    mode_labels_list = []
+    for h in hours:
+        p = plan_data[h]
+        bep_vals.append(p["bep"] if p["bep"] is not None else 0)
+        mode_labels_list.append(p["best_mode"])
+
+    # BEP 막대 색상: 가동=초록, 감발=노랑, 정지=빨강
+    bar_colors = []
+    for h in hours:
+        action = plan_data[h]["action"]
+        if action == "가동":
+            bar_colors.append("#2ecc71")
+        elif action == "감발전환":
+            bar_colors.append("#f39c12")
+        elif action == "기력점화검토":
+            bar_colors.append("#3498db")
+        else:
+            bar_colors.append("#e74c3c")
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # BEP 막대 ($/MMBtu) - 보조 Y축
+    fig.add_trace(
+        go.Bar(
+            x=x_labels, y=bep_vals,
+            name="최적모드 BEP ($/MMBtu)",
+            marker_color=bar_colors,
+            opacity=0.6,
+            text=[f"{m}<br>{b:.1f}" for m, b in zip(mode_labels_list, bep_vals)],
+            textposition="outside",
+            textfont=dict(size=10),
+            hovertemplate="%{x}<br>BEP: %{y:.2f} $/MMBtu<br>모드: %{text}<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    # SMP 꺾은선 (원/kWh) - 주 Y축
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels, y=smp_vals,
+            mode="lines+markers",
+            name="SMP (원/kWh)",
+            line=dict(color="#e74c3c", width=3),
+            marker=dict(size=7),
+            hovertemplate="%{x}<br>SMP: %{y:.1f} 원/kWh<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+
+    # LNG가격 점선 ($/MMBtu) - 보조 Y축
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels,
+            y=[lng_price_val] * len(hours),
+            mode="lines",
+            name=f"LNG가격 {lng_price_val} $/MMBtu",
+            line=dict(color="#2c3e50", width=2.5, dash="dash"),
+            hovertemplate=f"LNG가격: {lng_price_val} $/MMBtu<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
+    # SMP 임계선 - 주 Y축
+    fig.add_trace(
+        go.Scatter(
+            x=x_labels,
+            y=[thresholds_val["smp_low"]] * len(hours),
+            mode="lines",
+            name=f"감발 임계 SMP {thresholds_val['smp_low']:.0f}원",
+            line=dict(color="#e67e22", width=1.5, dash="dot"),
+            hoverinfo="skip",
+        ),
+        secondary_y=False,
+    )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16)),
+        height=420,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="center", x=0.5,
+            font=dict(size=11),
+        ),
+        margin=dict(t=80, b=40),
+        bargap=0.3,
+        hovermode="x unified",
+    )
+    fig.update_yaxes(
+        title_text="SMP (원/kWh)", secondary_y=False,
+        gridcolor="#eee",
+    )
+    fig.update_yaxes(
+        title_text="BEP / LNG가격 ($/MMBtu)", secondary_y=True,
+        gridcolor="rgba(0,0,0,0)",
+    )
+
+    # BEP > LNG가격 → 가동(O), BEP < LNG가격 → 정지(X) 주석
+    fig.add_annotation(
+        xref="paper", yref="paper", x=1.0, y=-0.12,
+        text="막대(BEP)가 점선(LNG가격) 위 = 가동(O) / 아래 = 정지(X)",
+        showarrow=False, font=dict(size=11, color="#666"),
+    )
+
+    return fig
+
+
+def _build_period_summary(hours, plan_data, smp_list):
+    """주간/야간 구간 요약 텍스트 생성."""
+    period_plan = [plan_data[h] for h in hours]
+    period_smp = [smp_list[h] for h in hours]
+
+    # 모드 분포
+    from collections import Counter
+    mode_counter = Counter(p["best_mode"] for p in period_plan)
+    action_counter = Counter(p["action"] for p in period_plan)
+
+    avg_smp = sum(period_smp) / len(period_smp)
+
+    # 주 운전모드
+    main_mode = mode_counter.most_common(1)[0]
+
+    lines = []
+    mode_str = ", ".join(f"**{m}** {c}시간" for m, c in mode_counter.most_common())
+    lines.append(f"운전모드: {mode_str}")
+    lines.append(f"평균 SMP: **{avg_smp:.1f}** 원/kWh "
+                 f"(최대 {max(period_smp):.1f}, 최소 {min(period_smp):.1f})")
+
+    # 이상구간 경고
+    warn_hours = [p for p in period_plan if p["action"] == "감발전환"]
+    stop_hours = [p for p in period_plan if p["action"] == "정지"]
+    steam_hours = [p for p in period_plan if p["action"] == "기력점화검토"]
+
+    if stop_hours:
+        hrs = ", ".join(f"{p['hour']}시" for p in stop_hours)
+        lines.append(f":red[정지 권고: {hrs}]")
+    if warn_hours:
+        hrs = ", ".join(f"{p['hour']}시" for p in warn_hours)
+        lines.append(f":orange[감발 전환 검토: {hrs}]")
+    if steam_hours:
+        hrs = ", ".join(f"{p['hour']}시" for p in steam_hours)
+        lines.append(f":blue[기력발전 점화 검토: {hrs}]")
+    if not (warn_hours or stop_hours or steam_hours):
+        lines.append(":green[이상구간 없음 - 정상 가동]")
+
+    return lines
+
+
+with tab5:
+    st.subheader(f"가동 가이던스 - {target_date}")
+
+    if data_loaded and smp_series:
+        # 데이터 준비
+        if "thresholds" not in dir() or thresholds is None:
+            thresholds = calc_smp_thresholds(
+                lng_price, lng_heat, exchange_rate, is_spot=is_spot
+            )
+        if "hourly_df" not in dir() or hourly_df is None:
+            pred_results = predict_day(
+                models, target_date, smp_series,
+                lng_price, lng_heat, exchange_rate,
+                elec_price_fn=get_elec_price,
+            )
+            hourly_df = build_hourly_table(
+                target_date=target_date,
+                smp_series=smp_series,
+                lng_price=lng_price,
+                lng_heat=lng_heat,
+                exchange_rate=exchange_rate,
+                pred_results=pred_results,
+                is_spot=is_spot,
+                smp_high_threshold=thresholds["smp_high"],
+            )
+
+        guidance = generate_full_guidance(
+            target_date=target_date,
+            hourly_df=hourly_df,
+            smp_series=smp_series,
+            thresholds=thresholds,
+            lng_price=lng_price,
+            exchange_rate=exchange_rate,
+            lng_heat=lng_heat,
+            is_spot=is_spot,
+        )
+
+        summary = guidance["daily_summary"]
+        alerts = guidance["alerts"]
+        plan = guidance["hourly_plan"]
+
+        price_type = "Spot" if is_spot else "사용단가"
+        weekday_kr = ["월","화","수","목","금","토","일"][target_date.weekday()]
+
+        # ── 상단 요약 카드 ──────────────────────────────
+        st.markdown(
+            f"**{target_date} ({weekday_kr})** | "
+            f"LNG {lng_price} $/MMBtu ({price_type}) | "
+            f"환율 {exchange_rate:,.0f}원/$ | "
+            f"열량 {lng_heat} Mcal/Nm3"
+        )
+
+        g_col1, g_col2, g_col3, g_col4 = st.columns(4)
+        with g_col1:
+            st.metric("평균 SMP", f"{summary['smp_avg']:.1f} 원/kWh")
+        with g_col2:
+            st.metric("최다 최적모드", summary["best_overall"])
+        with g_col3:
+            st.metric("일일 경제성", f"{summary['total_econ_best']:+.3f} 억원")
+        with g_col4:
+            n_anomaly = sum(len(v) for v in summary["anomaly_hours"].values())
+            delta_color = "off" if n_anomaly == 0 else "normal"
+            st.metric("이상구간", f"{n_anomaly}시간",
+                       delta="정상" if n_anomaly == 0 else f"{n_anomaly}건 주의",
+                       delta_color="off" if n_anomaly == 0 else "inverse")
+
+        # ── 종합 운전 권고 ──────────────────────────────
+        rec_lines = summary["recommendation"].split("\n")
+        for line in rec_lines:
+            if "[긴급]" in line:
+                st.error(line)
+            elif "[주의]" in line:
+                st.warning(line)
+            elif "[참고]" in line:
+                st.info(line)
+            else:
+                st.success(line)
+
+        st.markdown("---")
+
+        # ══════════════════════════════════════════════════
+        # 주간 가이던스 (08~22시)
+        # ══════════════════════════════════════════════════
+        DAY_HOURS = list(range(8, 22))    # 08~21시
+        NIGHT_HOURS = list(range(22, 24)) + list(range(0, 8))  # 22~23시, 00~07시
+
+        st.markdown("### 주간 운전 가이던스 (08:00 ~ 22:00)")
+
+        day_summary_lines = _build_period_summary(DAY_HOURS, plan, smp_series)
+        for line in day_summary_lines:
+            st.markdown(f"- {line}")
+
+        # 주간 가동계획표
+        plan_df_all = pd.DataFrame(plan)
+        day_plan = plan_df_all[plan_df_all["hour"].isin(DAY_HOURS)].copy()
+        day_display = day_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
+        day_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
+
+        def _style_action(row):
+            action = row["판단"]
+            if action == "정지":
+                return ["background-color: #ffcccc"] * len(row)
+            elif action == "감발전환":
+                return ["background-color: #fff3cd"] * len(row)
+            elif action == "기력점화검토":
+                return ["background-color: #cce5ff"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            day_display.style
+                .apply(_style_action, axis=1)
+                .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
+            use_container_width=True,
+            height=min(len(DAY_HOURS) * 38 + 40, 600),
+        )
+
+        # 주간 차트
+        fig_day = _build_guidance_chart(
+            DAY_HOURS, plan, smp_series, hourly_df,
+            lng_price, thresholds,
+            title=f"주간 (08~22시) SMP vs BEP 경제성 판단",
+        )
+        st.plotly_chart(fig_day, use_container_width=True)
+
+        st.markdown("---")
+
+        # ══════════════════════════════════════════════════
+        # 야간 가이던스 (22시 ~ 명일 08시)
+        # ══════════════════════════════════════════════════
+        st.markdown("### 야간 운전 가이던스 (22:00 ~ 익일 08:00)")
+
+        night_summary_lines = _build_period_summary(NIGHT_HOURS, plan, smp_series)
+        for line in night_summary_lines:
+            st.markdown(f"- {line}")
+
+        # 야간 가동계획표
+        night_plan = plan_df_all[plan_df_all["hour"].isin(NIGHT_HOURS)].copy()
+        # 정렬: 22,23,0,1,...,7 순서
+        night_order = {h: i for i, h in enumerate(NIGHT_HOURS)}
+        night_plan["_sort"] = night_plan["hour"].map(night_order)
+        night_plan = night_plan.sort_values("_sort").drop(columns=["_sort"])
+        night_display = night_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
+        night_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
+
+        st.dataframe(
+            night_display.style
+                .apply(_style_action, axis=1)
+                .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
+            use_container_width=True,
+            height=min(len(NIGHT_HOURS) * 38 + 40, 450),
+        )
+
+        # 야간 차트
+        fig_night = _build_guidance_chart(
+            NIGHT_HOURS, plan, smp_series, hourly_df,
+            lng_price, thresholds,
+            title=f"야간 (22시~익일08시) SMP vs BEP 경제성 판단",
+        )
+        st.plotly_chart(fig_night, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── 모드별 일일 경제성 요약 ─────────────────────
+        st.markdown("### 일일 경제성 요약")
+        es_col1, es_col2 = st.columns(2)
+
+        with es_col1:
+            st.markdown("**모드별 분포**")
+            for mode_name, hours_count in summary["mode_dist"].items():
+                st.write(f"- {mode_name}: {hours_count}시간")
+
+            if summary["anomaly_hours"]:
+                st.markdown("**이상구간**")
+                for atype, hrs in summary["anomaly_hours"].items():
+                    hr_str = ", ".join(f"{h}시" for h in hrs)
+                    st.write(f"- {atype}: {hr_str}")
+
+        with es_col2:
+            econ_summary_df = pd.DataFrame([
+                {"운전모드": m, "경제성(억원)": v}
+                for m, v in summary["econ_totals"].items()
+            ])
+            if not econ_summary_df.empty:
+                fig_econ_bar = go.Figure(go.Bar(
+                    x=econ_summary_df["운전모드"],
+                    y=econ_summary_df["경제성(억원)"],
+                    marker_color=["#4A90D9", "#7ED321", "#FF6B35"][:len(econ_summary_df)],
+                    text=econ_summary_df["경제성(억원)"].apply(lambda x: f"{x:+.3f}"),
+                    textposition="outside",
+                ))
+                fig_econ_bar.update_layout(
+                    title="모드별 일일 경제성 합계",
+                    yaxis_title="억원", height=300,
+                    margin=dict(t=40),
+                )
+                st.plotly_chart(fig_econ_bar, use_container_width=True)
+
+        # ── 다운로드 ────────────────────────────────────
+        st.markdown("---")
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                "가이던스 텍스트 리포트 다운로드",
+                guidance["text_report"],
+                file_name=f"가동가이던스_{target_date}.txt",
+                mime="text/plain",
+            )
+        with col_dl2:
+            full_plan_display = plan_df_all[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
+            full_plan_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
+            plan_csv = full_plan_display.to_csv(index=False, encoding="utf-8-sig")
+            st.download_button(
+                "가동계획표 CSV 다운로드",
+                plan_csv,
+                file_name=f"가동계획표_{target_date}.csv",
+                mime="text/csv",
+            )
+
+        # ── 카카오톡 메시지 ─────────────────────────────
+        st.markdown("### 카카오톡 전파 메시지")
+        kakao_msg = guidance.get("kakao_message", "")
+        if kakao_msg:
+            st.code(kakao_msg, language=None)
+    else:
+        st.warning("데이터를 로드하지 못했습니다.")
 
 
 # ══════════════════════════════════════════════════════════════
