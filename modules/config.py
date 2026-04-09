@@ -59,12 +59,43 @@ ELEC_RATES = {
 SPRING_FALL_DISCOUNT_HOURS = {11, 12, 13}
 
 # 법정 공휴일 (연도별 갱신 필요)
-LEGAL_HOLIDAYS = set()
+# 2026년 공휴일 (대체공휴일 포함)
+LEGAL_HOLIDAYS = {
+    # 2026년
+    "2026-01-01",  # 신정
+    "2026-01-28",  # 설날 연휴
+    "2026-01-29",  # 설날
+    "2026-01-30",  # 설날 연휴
+    "2026-03-01",  # 삼일절
+    "2026-05-05",  # 어린이날
+    "2026-05-24",  # 부처님오신날
+    "2026-06-06",  # 현충일
+    "2026-08-15",  # 광복절
+    "2026-08-17",  # 대체공휴일(광복절)
+    "2026-09-24",  # 추석 연휴
+    "2026-09-25",  # 추석
+    "2026-09-26",  # 추석 연휴
+    "2026-10-03",  # 개천절
+    "2026-10-05",  # 대체공휴일(개천절)
+    "2026-10-09",  # 한글날
+    "2026-12-25",  # 성탄절
+}
+# date 객체 set으로 변환
+from datetime import date as _date
+LEGAL_HOLIDAYS = {_date.fromisoformat(d) for d in LEGAL_HOLIDAYS}
 
 # ── 경제성 계산 ───────────────────────────────────────────────────
 OVERHEAD_COST = 0.8           # Spot LNG 제세금 ($/MMBtu)
 HOURS_PER_MONTH = 730         # 월 운전시간 (h)
 LOW2GI_EFF_FALLBACK = 1.65   # 저부하 효율 폴백값 (Mcal/kWh)
+
+# ── 모드별 고정 효율 (Mcal/kWh) ──────────────────────────────
+# 가동패턴 유지 시 효율은 거의 상수 → ML 예측 대신 실측 중앙값 사용
+MODE_EFFICIENCY = {
+    "1gi":    1.592,    # 1기 실측 중앙값
+    "low2gi": 1.679,    # 2기저부하 실측 중앙값
+    "2gi":    1.574,    # 2기 실측 중앙값
+}
 
 # ── SMP 이상 탐지 ─────────────────────────────────────────────────
 SMP_ZERO_THRESHOLD   = 0.0
@@ -74,20 +105,22 @@ COLOR_ANOMALY = "#FF4444"
 
 # ── ML 설정 ───────────────────────────────────────────────────────
 MODEL_FEATURES = [
-    "hour", "weekday", "month",
+    "weekday", "month",
     "smp", "lng_price", "lng_heat",
     "elec_price", "exchange_rate",
     "lng_gen", "net_load",
     "hour_sin", "hour_cos",
     "month_sin", "month_cos",
+    "is_low_load_gen", "is_high_eff_season",
 ]
 
 XGBOOST_PARAMS = {
     "n_estimators":  300,
-    "max_depth":     6,
+    "max_depth":     5,
     "learning_rate": 0.05,
     "subsample":     0.8,
     "colsample_bytree": 0.8,
+    "min_child_weight": 10,
     "random_state":  42,
     "n_jobs":        -1,
 }

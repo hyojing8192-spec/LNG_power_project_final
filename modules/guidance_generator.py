@@ -563,6 +563,64 @@ def _summarize_mode_ranges(hourly_plan: list[dict], hours: list[int]) -> list[st
     return lines
 
 
+def format_kakao_message_multi(
+    base_date: date,
+    daily_results: list[dict],
+) -> str:
+    """
+    다중 날짜 카카오톡 메시지 생성.
+
+    Args:
+        base_date: 기준일 (조회하는 날)
+        daily_results: [{date, hourly_plan, daily_summary}, ...] 날짜순 정렬
+
+    포맷:
+      안녕하십니까, M월D일 야간~M월D+N일 LNG발전 가동계획 안내드립니다.
+      [M월D일 22시~M월D+1일 08시]
+       - 00~00시 : 2기 full
+      [M월D+1일 주간(08~22시)]
+       - 00~00시 : 2기 full
+      ...반복...
+    """
+    from datetime import timedelta
+
+    if not daily_results:
+        return ""
+
+    first_date = base_date
+    last_date = daily_results[-1]["date"]
+
+    m1, d1 = first_date.month, first_date.day
+    m2, d2 = last_date.month, last_date.day
+
+    lines = []
+    lines.append(f"안녕하십니까, {m1}월{d1}일 야간~{m2}월{d2}일 LNG발전 가동계획 안내드립니다.")
+
+    for i, result in enumerate(daily_results):
+        target_d = result["date"]
+        plan = result["hourly_plan"]
+        prev_d = target_d - timedelta(days=1)
+
+        night_hours = list(range(22, 24)) + list(range(0, 8))
+        day_hours = list(range(8, 22))
+
+        pm, pd_ = prev_d.month, prev_d.day
+        tm, td = target_d.month, target_d.day
+
+        lines.append("")
+        lines.append(f"[{pm}월{pd_}일 22시~{tm}월{td}일 08시]")
+        lines.extend(_summarize_mode_ranges(plan, night_hours))
+        lines.append(f"[{tm}월{td}일 주간(08~22시)]")
+        lines.extend(_summarize_mode_ranges(plan, day_hours))
+
+    lines.append("")
+    lines.append("추가 안내드릴사항이 있으면 연락드리겠습니다.")
+    lines.append("문의사항이 있으시면 연락주시기바랍니다.")
+    lines.append("감사합니다!")
+
+    return "\n".join(lines)
+
+
 def format_kakao_message(
     target_date: date,
     hourly_plan: list[dict],

@@ -156,10 +156,14 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
     df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
 
+    # 레짐 지시변수 (효율 예측 개선용)
+    df["is_low_load_gen"] = (df["lng_gen"] < 565_000).astype(int)
+    df["is_high_eff_season"] = df["month"].isin([11, 12]).astype(int)
+
     return df
 
 
-FEATURE_COLS = MODEL_FEATURES  # config.py의 MODEL_FEATURES 직접 사용 (lng_gen, net_load 포함)
+FEATURE_COLS = MODEL_FEATURES  # config.py의 MODEL_FEATURES 직접 사용
 
 
 def time_series_train_test_split(
@@ -316,11 +320,10 @@ def train_all_models(df: pd.DataFrame) -> dict:
         "test_datetime_end": str(df_test["datetime"].max()),
     }
 
-    # 효율 컬럼명 정규화 (CSV 컬럼명에 따라 조정)
+    # 효율은 ML 학습하지 않음 — 가동패턴별 고정값 사용 (config.MODE_EFFICIENCY)
     target_map = {
         "export":     "export",
         "import":     "import",
-        "efficiency": "efficiency",
     }
 
     metrics: dict = {"_split": split_meta}
@@ -372,7 +375,8 @@ def train_all_models(df: pd.DataFrame) -> dict:
                             random_state=42,
                         )
                         # 피처 + 타깃(숫자만) 결합하여 오버샘플링
-                        target_cols = [c for c in ["export", "import", "efficiency"]
+                        # efficiency는 제외 (물리적 레짐 간 보간이 비현실적)
+                        target_cols = [c for c in ["export", "import"]
                                        if c in subset_tr.columns]
                         smote_cols = FEATURE_COLS + target_cols
                         X_all = subset_tr[smote_cols].copy()
@@ -383,8 +387,17 @@ def train_all_models(df: pd.DataFrame) -> dict:
 
                         X_resampled, _ = smote.fit_resample(X_all, y_label)
 
-                        subset_tr = pd.DataFrame(X_resampled, columns=smote_cols)
-                        subset_tr["mode"] = "low2gi"
+                        subset_tr_new = pd.DataFrame(X_resampled, columns=smote_cols)
+                        subset_tr_new["mode"] = "low2gi"
+                        # efficiency는 SMOTE 보간하지 않음 — 원본 행은 유지, 합성 행은 중앙값
+                        if "efficiency" in subset_tr.columns:
+                            eff_median = subset_tr["efficiency"].median()
+                            # 원본 행 수만큼은 원래 값 유지, 나머지(합성)는 중앙값
+                            eff_vals = list(subset_tr["efficiency"].values)
+                            n_synth = len(subset_tr_new) - len(eff_vals)
+                            eff_vals.extend([eff_median] * max(0, n_synth))
+                            subset_tr_new["efficiency"] = eff_vals[:len(subset_tr_new)]
+                        subset_tr = subset_tr_new
                         print(f"[INFO] low2gi SMOTE 완료: {len(subset_tr)}행")
                     else:
                         print(f"[INFO] low2gi SMOTE 스킵 (클래스 부족: k={k_neighbors})")
@@ -473,10 +486,12 @@ def load_models(df: pd.DataFrame | None = None) -> tuple[dict, dict]:
         metrics: {mode: {target: {mae, r2, ...}}}
     """
     models: dict = {}
+    # efficiency는 고정값 사용이므로 export/import 모델만 확인
+    ml_targets = ["export", "import"]
     all_exist = all(
         _get_model_path(mode, target).exists()
         for mode in MODES
-        for target in TARGET_NAMES
+        for target in ml_targets
     )
 
     if not all_exist:
@@ -489,7 +504,7 @@ def load_models(df: pd.DataFrame | None = None) -> tuple[dict, dict]:
 
     for mode in MODES:
         models[mode] = {}
-        for target in TARGET_NAMES:
+        for target in ml_targets:
             p = _get_model_path(mode, target)
             if p.exists():
                 with open(p, "rb") as f:
@@ -538,7 +553,6 @@ def predict_for_hour(
         net_load = imp["net_load"]
 
     row = {
-        "hour":         hour,
         "weekday":      weekday,
         "month":        month,
         "smp":          smp,
@@ -552,13 +566,15 @@ def predict_for_hour(
         "hour_cos":     np.cos(2 * np.pi * hour / 24),
         "month_sin":    np.sin(2 * np.pi * month / 12),
         "month_cos":    np.cos(2 * np.pi * month / 12),
+        "is_low_load_gen":   1 if float(lng_gen) < 565_000 else 0,
+        "is_high_eff_season": 1 if month in (11, 12) else 0,
     }
     X = pd.DataFrame([row])[FEATURE_COLS]
 
     result = {}
     mode_models = models.get(mode, {})
 
-    for target in TARGET_NAMES:
+    for target in ["export", "import"]:
         model = mode_models.get(target)
         if model:
             val = float(model.predict(X)[0])
@@ -566,10 +582,9 @@ def predict_for_hour(
         else:
             result[target] = 0.0
 
-    # low2gi 효율: ML 예측값 사용, 모델 없으면 실측 평균 폴백 (1.7 하드코딩 X)
-    if mode == "low2gi" and result.get("efficiency", 0.0) == 0.0:
-        from config import LOW2GI_EFF_FALLBACK
-        result["efficiency"] = LOW2GI_EFF_FALLBACK
+    # 효율: ML 예측 대신 모드별 고정값 사용 (가동패턴별 효율은 거의 상수)
+    from config import MODE_EFFICIENCY
+    result["efficiency"] = MODE_EFFICIENCY.get(mode, 1.575)
 
     return result
 

@@ -22,7 +22,7 @@ import time
 import os
 import json
 import argparse
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # 안전장치: 마우스를 화면 좌측 상단 모서리로 옮기면 즉시 중단
@@ -73,6 +73,117 @@ def save_coords(coords: dict):
 
 
 COORDS = load_coords()
+
+
+def _is_holiday(d: date) -> bool:
+    """공휴일 또는 주말 여부."""
+    try:
+        from config import LEGAL_HOLIDAYS
+        if d in LEGAL_HOLIDAYS:
+            return True
+    except ImportError:
+        pass
+    return d.weekday() >= 5  # 토(5), 일(6)
+
+
+def _is_workday(d: date) -> bool:
+    """평일(영업일) 여부."""
+    return not _is_holiday(d)
+
+
+def _has_cached_excel(target_date: date) -> bool:
+    """해당 날짜의 SMP 엑셀이 이미 저장되어 있는지 확인."""
+    d_str = target_date.strftime("%Y%m%d")
+    import glob
+    pattern = os.path.join(DEFAULT_SAVE_DIR, f"*{d_str}*.xlsx")
+    return len(glob.glob(pattern)) > 0
+
+
+def _has_valid_smp_data(target_date: date) -> bool:
+    """
+    해당 날짜의 SMP 엑셀에 시간별 데이터가 실제로 들어있는지 검증.
+    파일이 있어도 데이터가 0이거나 비어있으면 False.
+    """
+    import glob
+    import pandas as pd
+
+    d_str = target_date.strftime("%Y%m%d")
+    pattern = os.path.join(DEFAULT_SAVE_DIR, f"*{d_str}*.xlsx")
+    files = glob.glob(pattern)
+    if not files:
+        return False
+
+    try:
+        fpath = files[0]
+        df = pd.read_excel(fpath, header=None)
+        if df.shape[0] < 28 or df.shape[1] < 2:
+            return False
+
+        # Row 4~27 (01시~24시) SMP 추출
+        smp_count = 0
+        for row_idx in range(4, 28):
+            try:
+                val = float(str(df.iloc[row_idx, 1]).replace(",", ""))
+                if val > 0:
+                    smp_count += 1
+            except (ValueError, TypeError):
+                pass
+
+        # 24시간 중 절반 이상 유효한 데이터가 있으면 OK
+        return smp_count >= 12
+    except Exception:
+        return False
+
+
+def get_target_dates(base_date: date | None = None) -> list[date]:
+    """
+    SMP 다운로드 대상 날짜 목록 계산.
+
+    규칙:
+      - 기본: 내일만 다운로드 (1일)
+      - 내일이 휴일(주말/공휴일): 연속 휴일 + 다음 영업일까지
+      - 당일 엑셀이 없으면: 당일도 포함
+
+    이미 엑셀이 저장된 날짜는 건너뜀.
+
+    Args:
+        base_date: 기준일 = 조회하는 날 (None이면 오늘)
+
+    Returns:
+        정렬된 날짜 리스트 (캐시 미존재 날짜만)
+    """
+    if base_date is None:
+        base_date = date.today()
+
+    dates = set()
+
+    # 당일 유효 데이터가 없으면 당일도 포함
+    if not _has_valid_smp_data(base_date):
+        dates.add(base_date)
+
+    # 내일
+    tomorrow = base_date + timedelta(days=1)
+    dates.add(tomorrow)
+
+    # 내일이 휴일이면 연속 휴일 끝난 다음 영업일까지 추가
+    if _is_holiday(tomorrow):
+        d = tomorrow
+        while True:
+            next_d = d + timedelta(days=1)
+            if _is_holiday(next_d):
+                dates.add(next_d)
+                d = next_d
+            else:
+                dates.add(next_d)  # 다음 영업일
+                break
+
+    # 이미 유효한 SMP 데이터가 있는 날짜는 제외
+    dates = {d for d in dates if not _has_valid_smp_data(d)}
+
+    if not dates:
+        print("  [INFO] 모든 대상 날짜의 SMP 데이터가 이미 존재합니다.")
+
+    return sorted(dates)
 
 
 def is_kmos_running():
@@ -278,6 +389,408 @@ def download_smp_from_kmos(
     print(f"  파일: {save_path}")
 
 
+def download_multi_dates(
+    base_date: date | None = None,
+    delay: float = 1.5,
+):
+    """
+    오늘/내일/주말/공휴일 규칙에 따라 다중 날짜 SMP를 연속 다운로드.
+
+    ePower 마켓을 1회 실행하고, 각 날짜마다 조회 > 저장을 반복한 뒤 종료.
+    """
+    if base_date is None:
+        base_date = date.today()
+
+    targets = get_target_dates(base_date)
+    weekdays_kr = ["월","화","수","목","금","토","일"]
+
+    now_str = lambda: datetime.now().strftime("%H:%M:%S")
+
+    print("=" * 60)
+    print(f"  KMOS 다중 날짜 SMP 다운로드")
+    print(f"  기준일: {base_date} ({weekdays_kr[base_date.weekday()]})")
+    print(f"  대상 날짜: {len(targets)}일")
+    for d in targets:
+        holiday_tag = " [휴일]" if _is_holiday(d) else ""
+        print(f"    - {d} ({weekdays_kr[d.weekday()]}){holiday_tag}")
+    print("=" * 60)
+    print()
+
+    # ── ePower 실행 (1회) ──
+    if is_kmos_running():
+        print(f"[{now_str()}] ePower 이미 실행 중. 전면 전환...")
+        subprocess.run([
+            "powershell.exe", "-NoProfile", "-Command",
+            "$p = Get-Process XPlatform -ErrorAction SilentlyContinue | "
+            "Where-Object {$_.MainWindowHandle -ne 0} | Select-Object -First 1; "
+            "if($p){ Add-Type '[DllImport(\"user32.dll\")] public static extern bool "
+            "SetForegroundWindow(IntPtr hWnd); [DllImport(\"user32.dll\")] public static extern bool "
+            "ShowWindow(IntPtr hWnd, int nCmdShow);' -Name W -Namespace A; "
+            "[A.W]::ShowWindow($p.MainWindowHandle, 9); "
+            "[A.W]::SetForegroundWindow($p.MainWindowHandle) }"
+        ], capture_output=True)
+        time.sleep(2)
+    else:
+        print(f"[{now_str()}] ePower 마켓 실행...")
+        os.startfile(KMOS_SHORTCUT)
+        time_sleep = 35
+        print(f"  {time_sleep}초 대기 (로딩)...")
+        time.sleep(time_sleep)
+        if not is_kmos_running():
+            print(f"  실행 실패. 수동으로 켜주세요.")
+            return []
+
+    # 전체화면
+    pyautogui.hotkey("win", "up")
+    time.sleep(2)
+
+    # 계통한계가격 메뉴 클릭 (첫 번째만)
+    print(f"[{now_str()}] 계통한계가격 메뉴 클릭...")
+    pyautogui.click(*COORDS["계통한계가격_메뉴"])
+    time.sleep(delay * 3)
+
+    results = []
+
+    for i, target_d in enumerate(targets):
+        d_str = target_d.strftime('%Y%m%d')
+        filename = f"계통한계가격_{d_str}_육지"
+        holiday_tag = " [휴일]" if _is_holiday(target_d) else ""
+
+        print(f"\n{'─'*50}")
+        print(f"  [{i+1}/{len(targets)}] {target_d} ({weekdays_kr[target_d.weekday()]}){holiday_tag}")
+        print(f"  파일명: {filename}")
+        print(f"{'─'*50}")
+
+        # 날짜 이동: ePower는 오늘 날짜로 열림
+        # - 첫 번째가 오늘이면 화살표 안 누름
+        # - 그 외에는 화살표 1회씩 클릭
+        if i == 0 and target_d == base_date:
+            print(f"[{now_str()}] 오늘 날짜 (기본값) - 변경 없음")
+        else:
+            print(f"[{now_str()}] 다음 날짜로 이동 (화살표 클릭)...")
+            pyautogui.click(*COORDS["내일_날짜_선택"])
+            time.sleep(delay * 2)
+
+        # 조회
+        print(f"[{now_str()}] 조회...")
+        pyautogui.click(*COORDS["조회_버튼"])
+        time.sleep(delay * 3)
+
+        # 엑셀 아이콘
+        print(f"[{now_str()}] 엑셀 다운로드...")
+        pyautogui.click(*COORDS["엑셀_아이콘"])
+        time.sleep(delay)
+
+        # 저장하기
+        pyautogui.click(*COORDS["저장하기_버튼"])
+        time.sleep(delay * 2)
+
+        # 디렉토리 이동
+        pyautogui.hotkey("alt", "d")
+        time.sleep(0.5)
+        clipboard_paste(DEFAULT_SAVE_DIR)
+        time.sleep(0.5)
+        pyautogui.press("enter")
+        time.sleep(delay * 3)
+
+        # 저장 버튼
+        pyautogui.click(*COORDS["저장_버튼"])
+        time.sleep(delay * 2)
+
+        # 안전 확인 팝업
+        pyautogui.click(*COORDS["안전확인_팝업"])
+        time.sleep(delay)
+
+        # 파일 저장 대기
+        import shutil, glob
+        save_path = os.path.join(DEFAULT_SAVE_DIR, f"{filename}.xlsx")
+        found = False
+        search_dirs = [
+            DEFAULT_SAVE_DIR,
+            os.path.expanduser("~/Documents"),
+            os.path.expanduser("~/Downloads"),
+            os.path.expanduser("~/Desktop"),
+        ]
+        for _ in range(20):
+            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                print(f"  저장 확인: {save_path} ({os.path.getsize(save_path):,} bytes)")
+                found = True
+                break
+            for search_dir in search_dirs:
+                if not os.path.isdir(search_dir):
+                    continue
+                for f in glob.glob(os.path.join(search_dir, "*.xlsx")):
+                    if os.path.basename(f).startswith("~$"):
+                        continue
+                    if time.time() - os.path.getmtime(f) < 60 and os.path.getsize(f) > 0:
+                        if f != save_path:
+                            os.makedirs(DEFAULT_SAVE_DIR, exist_ok=True)
+                            dest = os.path.join(DEFAULT_SAVE_DIR, os.path.basename(f))
+                            shutil.move(f, dest)
+                            save_path = dest
+                            print(f"  저장 확인: {dest}")
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                break
+            time.sleep(1)
+
+        if not found:
+            print(f"  [!] 파일 저장 실패")
+
+        results.append({"date": target_d, "file": save_path, "success": found})
+
+        # 다음 날짜를 위해 잠시 대기
+        if i < len(targets) - 1:
+            time.sleep(delay)
+
+    # ── KMOS 종료 ──
+    print(f"\n[{now_str()}] KMOS 종료...")
+    subprocess.run(["taskkill", "/IM", "XPlatform.exe", "/F"], capture_output=True)
+    time.sleep(1)
+
+    # 결과 요약
+    print(f"\n{'='*60}")
+    print(f"  다운로드 결과 ({len([r for r in results if r['success']])}/{len(results)} 성공)")
+    print(f"{'='*60}")
+    for r in results:
+        status = "OK" if r["success"] else "FAIL"
+        print(f"  [{status}] {r['date']} -> {os.path.basename(r['file'])}")
+
+    return results
+
+
+def run_scheduled_download(base_date: date | None = None, delay: float = 1.5):
+    """
+    매일 17:30~19:30 SMP 자동 수집 스케줄.
+
+    실행 흐름:
+      17:30  1차 시도 - 대상 날짜 전체 다운로드
+      18:00  2차 시도 - 데이터 없는 날짜만 재시도
+      18:30  3차 시도
+      19:00  4차 시도
+      19:30  최종 시도
+
+    각 시도마다 유효 데이터가 있는 날짜는 자동 건너뜀.
+    모든 날짜에 데이터가 채워지면 조기 종료.
+    """
+    if base_date is None:
+        base_date = date.today()
+
+    weekdays_kr = ["월","화","수","목","금","토","일"]
+    now_str = lambda: datetime.now().strftime("%H:%M:%S")
+
+    # 전체 대상 날짜 (캐시 무관하게 산출)
+    all_dates = set()
+    if not _has_valid_smp_data(base_date):
+        all_dates.add(base_date)
+    tomorrow = base_date + timedelta(days=1)
+    all_dates.add(tomorrow)
+    if _is_holiday(tomorrow):
+        d = tomorrow
+        while True:
+            next_d = d + timedelta(days=1)
+            if _is_holiday(next_d):
+                all_dates.add(next_d)
+                d = next_d
+            else:
+                all_dates.add(next_d)
+                break
+    all_dates = sorted(all_dates)
+
+    print("=" * 60)
+    print(f"  SMP 자동 수집 스케줄 시작")
+    print(f"  기준일: {base_date} ({weekdays_kr[base_date.weekday()]})")
+    print(f"  전체 대상: {len(all_dates)}일")
+    for d in all_dates:
+        tag = " [휴일]" if _is_holiday(d) else ""
+        print(f"    - {d} ({weekdays_kr[d.weekday()]}){tag}")
+    print(f"  스케줄: 17:30, 18:00, 18:30, 19:00, 19:30 (최대 5회)")
+    print("=" * 60)
+
+    schedule_times = ["17:30", "18:00", "18:30", "19:00", "19:30"]
+
+    for attempt, sched_time in enumerate(schedule_times, 1):
+        # 아직 데이터 없는 날짜만 확인
+        remaining = [d for d in all_dates if not _has_valid_smp_data(d)]
+
+        if not remaining:
+            print(f"\n[{now_str()}] 모든 날짜 수집 완료! 스케줄 종료.")
+            break
+
+        print(f"\n{'='*60}")
+        print(f"  [{attempt}/5] {sched_time} 시도 - 미수집 {len(remaining)}일: "
+              f"{[str(d) for d in remaining]}")
+        print(f"{'='*60}")
+
+        # 대기 (첫 시도는 즉시, 이후 30분 대기)
+        if attempt > 1:
+            target_h, target_m = map(int, sched_time.split(":"))
+            now = datetime.now()
+            target_time = now.replace(hour=target_h, minute=target_m, second=0)
+            wait_sec = (target_time - now).total_seconds()
+            if wait_sec > 0:
+                print(f"  {sched_time}까지 {wait_sec:.0f}초 대기...")
+                time.sleep(wait_sec)
+            # 이미 지났으면 바로 실행
+
+        # 다운로드 실행
+        # remaining 날짜만 다운로드하기 위해 임시로 get_target_dates를 우회
+        if remaining:
+            _download_specific_dates(remaining, delay=delay)
+
+    # 최종 결과
+    print(f"\n{'='*60}")
+    print(f"  최종 수집 결과")
+    print(f"{'='*60}")
+    for d in all_dates:
+        valid = _has_valid_smp_data(d)
+        status = "OK" if valid else "FAIL"
+        print(f"  [{status}] {d} ({weekdays_kr[d.weekday()]})")
+
+    failed = [d for d in all_dates if not _has_valid_smp_data(d)]
+    if failed:
+        print(f"\n  [!] 미수집 {len(failed)}일: {[str(d) for d in failed]}")
+    else:
+        print(f"\n  전체 {len(all_dates)}일 수집 완료!")
+
+
+def _download_specific_dates(dates: list[date], delay: float = 1.5):
+    """지정된 날짜 목록만 ePower에서 다운로드. ePower 실행~종료 포함."""
+    weekdays_kr = ["월","화","수","목","금","토","일"]
+    now_str = lambda: datetime.now().strftime("%H:%M:%S")
+    base_date = date.today()
+
+    if not dates:
+        return
+
+    # ePower 실행
+    if is_kmos_running():
+        print(f"[{now_str()}] ePower 이미 실행 중. 전면 전환...")
+        subprocess.run([
+            "powershell.exe", "-NoProfile", "-Command",
+            "$p = Get-Process XPlatform -ErrorAction SilentlyContinue | "
+            "Where-Object {$_.MainWindowHandle -ne 0} | Select-Object -First 1; "
+            "if($p){ Add-Type '[DllImport(\"user32.dll\")] public static extern bool "
+            "SetForegroundWindow(IntPtr hWnd); [DllImport(\"user32.dll\")] public static extern bool "
+            "ShowWindow(IntPtr hWnd, int nCmdShow);' -Name W -Namespace A; "
+            "[A.W]::ShowWindow($p.MainWindowHandle, 9); "
+            "[A.W]::SetForegroundWindow($p.MainWindowHandle) }"
+        ], capture_output=True)
+        time.sleep(2)
+    else:
+        print(f"[{now_str()}] ePower 마켓 실행...")
+        os.startfile(KMOS_SHORTCUT)
+        time_sleep = 35
+        print(f"  {time_sleep}초 대기 (로딩)...")
+        time.sleep(time_sleep)
+        if not is_kmos_running():
+            print(f"  실행 실패.")
+            return
+
+    pyautogui.hotkey("win", "up")
+    time.sleep(2)
+
+    # 계통한계가격 메뉴
+    print(f"[{now_str()}] 계통한계가격 메뉴 클릭...")
+    pyautogui.click(*COORDS["계통한계가격_메뉴"])
+    time.sleep(delay * 3)
+
+    # 날짜를 오늘 기준 오프셋으로 정렬 (화살표 클릭 횟수 계산)
+    dates_sorted = sorted(dates)
+
+    # ePower는 오늘 날짜로 열림 → 첫 대상까지 화살표 클릭 필요
+    current_offset = 0  # 현재 ePower에 표시된 날짜 = 오늘(offset 0)
+
+    for i, target_d in enumerate(dates_sorted):
+        target_offset = (target_d - base_date).days
+        clicks_needed = target_offset - current_offset
+
+        d_str = target_d.strftime('%Y%m%d')
+        filename = f"계통한계가격_{d_str}_육지"
+        holiday_tag = " [휴일]" if _is_holiday(target_d) else ""
+
+        print(f"\n  [{i+1}/{len(dates_sorted)}] {target_d} ({weekdays_kr[target_d.weekday()]}){holiday_tag}")
+
+        # 화살표로 날짜 이동
+        if clicks_needed > 0:
+            print(f"[{now_str()}] 화살표 {clicks_needed}회 클릭...")
+            for _ in range(clicks_needed):
+                pyautogui.click(*COORDS["내일_날짜_선택"])
+                time.sleep(0.5)
+            time.sleep(delay)
+        elif clicks_needed == 0 and i == 0:
+            print(f"[{now_str()}] 오늘 날짜 (기본값)")
+
+        current_offset = target_offset
+
+        # 조회
+        print(f"[{now_str()}] 조회...")
+        pyautogui.click(*COORDS["조회_버튼"])
+        time.sleep(delay * 3)
+
+        # 엑셀 > 저장
+        pyautogui.click(*COORDS["엑셀_아이콘"])
+        time.sleep(delay)
+        pyautogui.click(*COORDS["저장하기_버튼"])
+        time.sleep(delay * 2)
+
+        # 디렉토리
+        pyautogui.hotkey("alt", "d")
+        time.sleep(0.5)
+        clipboard_paste(DEFAULT_SAVE_DIR)
+        time.sleep(0.5)
+        pyautogui.press("enter")
+        time.sleep(delay * 3)
+
+        # 저장
+        pyautogui.click(*COORDS["저장_버튼"])
+        time.sleep(delay * 2)
+
+        # 안전 확인
+        pyautogui.click(*COORDS["안전확인_팝업"])
+        time.sleep(delay)
+
+        # 파일 확인
+        import shutil, glob as glob_mod
+        save_path = os.path.join(DEFAULT_SAVE_DIR, f"{filename}.xlsx")
+        found = False
+        for _ in range(15):
+            if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                print(f"  저장 OK: {os.path.basename(save_path)}")
+                found = True
+                break
+            for sd in [DEFAULT_SAVE_DIR, os.path.expanduser("~/Documents"),
+                       os.path.expanduser("~/Downloads"), os.path.expanduser("~/Desktop")]:
+                if not os.path.isdir(sd):
+                    continue
+                for f in glob_mod.glob(os.path.join(sd, "*.xlsx")):
+                    if os.path.basename(f).startswith("~$"):
+                        continue
+                    if time.time() - os.path.getmtime(f) < 60 and os.path.getsize(f) > 0 and f != save_path:
+                        os.makedirs(DEFAULT_SAVE_DIR, exist_ok=True)
+                        dest = os.path.join(DEFAULT_SAVE_DIR, os.path.basename(f))
+                        shutil.move(f, dest)
+                        print(f"  저장 OK: {os.path.basename(dest)}")
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                break
+            time.sleep(1)
+
+        if not found:
+            print(f"  [!] 저장 실패")
+
+    # KMOS 종료
+    print(f"\n[{now_str()}] KMOS 종료...")
+    subprocess.run(["taskkill", "/IM", "XPlatform.exe", "/F"], capture_output=True)
+    time.sleep(1)
+
+
 def calibrate_coords():
     """
     대화형 좌표 캡처 도구.
@@ -348,11 +861,15 @@ def show_coords():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="KMOS 계통한계가격 자동 다운로드")
     parser.add_argument("--filename", default=DEFAULT_FILENAME, help="저장 파일명")
-    parser.add_argument("--delay", type=float, default=1.0, help="클릭 간 대기 시간 (초)")
+    parser.add_argument("--delay", type=float, default=1.5, help="클릭 간 대기 시간 (초)")
     parser.add_argument("--skip-menu", action="store_true", help="계통한계가격 메뉴 생략")
     parser.add_argument("--skip-date", action="store_true", help="날짜 선택 생략")
     parser.add_argument("--calibrate", action="store_true", help="좌표 캡처 모드")
     parser.add_argument("--show-coords", action="store_true", help="현재 좌표 확인")
+    parser.add_argument("--multi", action="store_true", help="다중 날짜 다운로드 (오늘+내일+주말/공휴일)")
+    parser.add_argument("--schedule", action="store_true", help="17:30~19:30 자동 수집 (30분 간격 재시도)")
+    parser.add_argument("--base-date", type=str, default=None, help="기준일 (YYYY-MM-DD)")
+    parser.add_argument("--show-dates", action="store_true", help="다운로드 대상 날짜 확인 (실행 안 함)")
 
     args = parser.parse_args()
 
@@ -360,6 +877,27 @@ if __name__ == "__main__":
         calibrate_coords()
     elif args.show_coords:
         show_coords()
+    elif args.show_dates:
+        base = date.today()
+        if args.base_date:
+            base = date.fromisoformat(args.base_date)
+        targets = get_target_dates(base)
+        weekdays_kr = ["월","화","수","목","금","토","일"]
+        print(f"\n  기준일: {base} ({weekdays_kr[base.weekday()]})")
+        print(f"  다운로드 대상: {len(targets)}일")
+        for d in targets:
+            tag = " [휴일]" if _is_holiday(d) else ""
+            print(f"    - {d} ({weekdays_kr[d.weekday()]}){tag}")
+    elif args.schedule:
+        base = None
+        if args.base_date:
+            base = date.fromisoformat(args.base_date)
+        run_scheduled_download(base_date=base, delay=args.delay)
+    elif args.multi:
+        base = None
+        if args.base_date:
+            base = date.fromisoformat(args.base_date)
+        download_multi_dates(base_date=base, delay=args.delay)
     else:
         if not COORDS_FILE.exists():
             print("[!] 좌표 캡처가 필요합니다. 먼저 아래 명령을 실행하세요:")

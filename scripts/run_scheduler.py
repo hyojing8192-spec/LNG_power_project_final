@@ -49,9 +49,10 @@ from smp_collector import collect_smp
 from economics_engine import build_hourly_table, get_elec_price
 from anomaly_detector import calc_smp_thresholds
 from ml_predictor import load_data, load_models, predict_day
-from guidance_generator import generate_full_guidance
+from guidance_generator import generate_full_guidance, format_kakao_message_multi
 from mail_sender import send_daily_report, send_urgent_alert, _is_configured
 from kakao_sender import send_kakao_guidance
+from kmos_smp_download import get_target_dates
 from config import DEFAULT_LNG_PRICE, DEFAULT_LNG_HEAT, FALLBACK_EXCHANGE_RATE
 
 
@@ -209,6 +210,160 @@ def run_pipeline(target_date: date | None = None, lng_price: float = DEFAULT_LNG
     return True
 
 
+def run_pipeline_multi(
+    base_date: date | None = None,
+    lng_price: float = DEFAULT_LNG_PRICE,
+    is_spot: bool = False,
+):
+    """
+    다중 날짜 파이프라인: 자동으로 대상 날짜를 판단하여 전체 가이던스 생성 + 전파.
+
+    - 평일(월~목): 오늘 22시 ~ 내일 22시
+    - 금요일: 금 22시 ~ 월 22시
+    - 공휴일 전날: 전날 22시 ~ 연휴 끝난 다음날 22시
+    """
+    if base_date is None:
+        base_date = date.today()
+
+    target_dates = get_target_dates(base_date)
+    weekdays_kr = ["월","화","수","목","금","토","일"]
+
+    logger.info(f"===== 다중 날짜 파이프라인 시작: {base_date} ({weekdays_kr[base_date.weekday()]}) =====")
+    logger.info(f"  대상 날짜: {len(target_dates)}일 - {[str(d) for d in target_dates]}")
+
+    # 고정변수 1회 로드
+    logger.info("[1] 고정변수 설정...")
+    try:
+        df = load_data()
+        lng_heat = round(float(df["lng_heat"].mean()), 4) if "lng_heat" in df.columns else DEFAULT_LNG_HEAT
+
+        if "exchange_rate" in df.columns and "datetime" in df.columns:
+            df_tmp = df.copy()
+            df_tmp["_date"] = df_tmp["datetime"].dt.date
+            last_date = df_tmp["_date"].max()
+            prev = df_tmp[df_tmp["_date"] < last_date]
+            if not prev.empty:
+                prev_date = prev["_date"].max()
+                exchange_rate = round(float(prev[prev["_date"] == prev_date]["exchange_rate"].mean()), 2)
+            else:
+                exchange_rate = round(float(df["exchange_rate"].mean()), 2)
+        else:
+            exchange_rate = float(FALLBACK_EXCHANGE_RATE)
+
+        models, metrics = load_models(df)
+        thresholds = calc_smp_thresholds(lng_price, lng_heat, exchange_rate, is_spot=is_spot)
+        logger.info(f"  LNG: {lng_price}$/MMBtu, 환율: {exchange_rate:,.0f}원/$")
+    except Exception as e:
+        logger.error(f"  고정변수/모델 로드 실패: {e}")
+        return False
+
+    # 각 날짜별 SMP 수집 + 경제성 분석
+    daily_results = []
+    all_alerts = []
+
+    for target_d in target_dates:
+        d_label = f"{target_d} ({weekdays_kr[target_d.weekday()]})"
+        logger.info(f"\n[2] {d_label} SMP 수집 및 분석...")
+
+        try:
+            smp_result = collect_smp(target_d)
+            smp_series = smp_result["smp"]
+            avg_smp = sum(smp_series) / 24
+            logger.info(f"  SMP: {smp_result['source']}, 평균 {avg_smp:.1f}원")
+
+            pred_results = predict_day(
+                models, target_d, smp_series,
+                lng_price, lng_heat, exchange_rate,
+                elec_price_fn=get_elec_price,
+            )
+            hourly_df = build_hourly_table(
+                target_date=target_d,
+                smp_series=smp_series,
+                lng_price=lng_price,
+                lng_heat=lng_heat,
+                exchange_rate=exchange_rate,
+                pred_results=pred_results,
+                is_spot=is_spot,
+                smp_high_threshold=thresholds["smp_high"],
+            )
+
+            guidance = generate_full_guidance(
+                target_date=target_d,
+                hourly_df=hourly_df,
+                smp_series=smp_series,
+                thresholds=thresholds,
+                lng_price=lng_price,
+                exchange_rate=exchange_rate,
+                lng_heat=lng_heat,
+                is_spot=is_spot,
+            )
+
+            daily_results.append({
+                "date": target_d,
+                "hourly_plan": guidance["hourly_plan"],
+                "daily_summary": guidance["daily_summary"],
+                "alerts": guidance["alerts"],
+                "smp_series": smp_series,
+                "hourly_df": hourly_df,
+                "thresholds": thresholds,
+                "text_report": guidance["text_report"],
+            })
+            all_alerts.extend(guidance["alerts"])
+
+            # CSV 저장
+            out_path = ROOT / "data" / f"경제성분석_{target_d}.csv"
+            hourly_df.to_csv(out_path, index=False, encoding="utf-8-sig")
+            logger.info(f"  CSV: {out_path}")
+
+        except Exception as e:
+            logger.error(f"  {d_label} 분석 실패: {e}")
+
+    if not daily_results:
+        logger.error("분석 결과 없음. 종료.")
+        return False
+
+    # 다중 날짜 카톡 메시지 생성
+    kakao_msg = format_kakao_message_multi(base_date, daily_results)
+
+    # ── 전파 ──
+    logger.info(f"\n[3] 전파 ({len(daily_results)}일치)...")
+
+    # 카카오톡
+    try:
+        kakao_sent = send_kakao_guidance(kakao_msg)
+        if kakao_sent:
+            logger.info("  카카오톡 발송 완료")
+    except Exception as e:
+        logger.error(f"  카카오톡 발송 실패: {e}")
+
+    # 이메일 (첫 번째 날짜 기준 리포트)
+    if _is_configured() and daily_results:
+        try:
+            first = daily_results[0]
+            send_daily_report(
+                first["date"], first["daily_summary"], all_alerts,
+                first["hourly_plan"], first["hourly_df"],
+                first["text_report"],
+                smp_series=first["smp_series"], thresholds=first["thresholds"],
+            )
+            logger.info("  이메일 발송 완료")
+        except Exception as e:
+            logger.error(f"  이메일 발송 실패: {e}")
+
+    # 콘솔 출력
+    for r in daily_results:
+        print(r["text_report"])
+
+    print("\n" + "=" * 70)
+    print("  [카카오톡 메시지]")
+    print("=" * 70)
+    print(kakao_msg)
+    print("=" * 70)
+
+    logger.info(f"===== 다중 날짜 파이프라인 완료: {len(daily_results)}일 =====")
+    return True
+
+
 # ──────────────────────────────────────────────────────────────
 # F7.1  APScheduler 스케줄링
 # ──────────────────────────────────────────────────────────────
@@ -233,7 +388,7 @@ def start_scheduler():
     for t in run_times:
         hour, minute = map(int, t.split(":"))
         scheduler.add_job(
-            run_pipeline,
+            run_pipeline_multi,
             trigger="cron",
             hour=hour,
             minute=minute,
@@ -256,13 +411,19 @@ def start_scheduler():
 
 def main():
     parser = argparse.ArgumentParser(description="LNG 발전 경제성 자동 분석 스케줄러")
-    parser.add_argument("--now", action="store_true", help="즉시 1회 실행")
-    parser.add_argument("--date", type=str, default=None, help="분석 날짜 (YYYY-MM-DD)")
+    parser.add_argument("--now", action="store_true", help="즉시 1회 실행 (1일치)")
+    parser.add_argument("--auto", action="store_true", help="자동 판단 실행 (평일/금요일/공휴일 자동)")
+    parser.add_argument("--date", type=str, default=None, help="기준일 (YYYY-MM-DD)")
     parser.add_argument("--lng-price", type=float, default=DEFAULT_LNG_PRICE, help="LNG 가격")
     parser.add_argument("--spot", action="store_true", help="Spot LNG")
     args = parser.parse_args()
 
-    if args.now or args.date:
+    if args.auto:
+        base = date.today()
+        if args.date:
+            base = date.fromisoformat(args.date)
+        run_pipeline_multi(base, args.lng_price, args.spot)
+    elif args.now or args.date:
         target = date.today() + timedelta(days=1)
         if args.date:
             target = date.fromisoformat(args.date)
