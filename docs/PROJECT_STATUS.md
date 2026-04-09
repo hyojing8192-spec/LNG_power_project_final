@@ -1,6 +1,6 @@
 # LNG 발전 가동경제성 자동 판단 시스템 — 프로젝트 현황
 
-> 최종 업데이트: 2025-07  
+> 최종 업데이트: 2026-04-09  
 > 라이선스: CC BY-NC 4.0
 
 ---
@@ -10,8 +10,9 @@
 ```
 LNG발전 가동경제성 자동 판단 시스템
 │
-├─ F1. 데이터 수집 모듈                          [data_collector.py]
-│   ├─ F1.1 SMP 데이터 자동 수집                 ← 전력거래소 크롤링 (17~19시)
+├─ F1. 데이터 수집 모듈                          [완료]
+│   ├─ F1.1 SMP 데이터 자동 수집                 ← KMOS GUI 자동화 (kmos_smp_download.py)
+│   │       · 전력거래소 크롤링은 과거데이터 백필용으로 별도 보유 (data_collector.py)
 │   ├─ F1.2 월간 고정변수 관리                   ← LNG가격·열량·is_spot (JSON)
 │   ├─ F1.3 당일 환율 자동 수집                  ← 한국은행 ECOS Open API
 │   └─ F1.4 데이터 조립 및 전처리               ← build_daily_input() 통합 반환
@@ -40,22 +41,23 @@ LNG발전 가동경제성 자동 판단 시스템
 │   │       · SMP 과대        : SMP ≥ smp_high
 │   └─ F4.2 경제성 급변 구간 탐지               ← 전 시간 대비 경제성 변화량
 │
-├─ F5. 가동 가이던스 생성                        [미착수]
+├─ F5. 가동 가이던스 생성                        [완료] [guidance_generator.py]
 │   ├─ F5.1 시간별 가동계획표 생성
 │   ├─ F5.2 일간 요약 리포트 생성
 │   └─ F5.3 이상구간 경고 메시지 생성
 │         · SMP 과대(≥smp_high): 기력발전 점화 안내 포함
 │         · SMP 경제성 한계   : 감발 또는 정지 안내
 │
-├─ F6. 자동 전파 모듈                            [미착수]
-│   ├─ F6.1 정기 메일 발송                      ← 매일 17~19시, HTML 테이블
+├─ F6. 자동 전파 모듈                            [완료]
+│   ├─ F6.1 정기 메일 발송                      ← Gmail SMTP (mail_sender.py)
 │   ├─ F6.2 긴급 알림 발송                      ← SMP 이상치 탐지 즉시 트리거
-│   └─ F6.3 (선택) HMI 연동
+│   ├─ F6.3 카카오톡 전파                       ← 카카오 REST API (kakao_sender.py)
+│   └─ F6.4 (선택) HMI 연동
 │
-└─ F7. 운영 관리                                 [미착수]
-    ├─ F7.1 실행 스케줄링                        ← APScheduler / cron
-    ├─ F7.2 실행 로그 관리                       ← logging 모듈
-    └─ F7.3 (선택) Streamlit 대시보드
+└─ F7. 운영 관리                                 [완료] [run_scheduler.py]
+    ├─ F7.1 실행 스케줄링                        ← APScheduler 17:30~19:30
+    ├─ F7.2 실행 로그 관리                       ← logging → logs/scheduler.log
+    └─ F7.3 Streamlit 대시보드                  ← LNG_project_final.py
 ```
 
 ---
@@ -134,13 +136,13 @@ LNG발전 가동경제성 자동 판단 시스템
 
 | 모듈 | 파일 | 상태 | 비고 |
 |------|------|------|------|
-| F1. 데이터 수집 | `data_collector.py` | 🟡 부분완료 | 크롤링 파싱 로직 현장 확인 필요 |
+| F1. 데이터 수집 | `kmos_smp_download.py` | ✅ 완료 | KMOS GUI 자동화, 전력거래소 크롤링은 과거데이터 백필용 |
 | F1.4 전처리 | `preprocess_데이터.py` | ✅ 완료 | 저부하 더미 보강 포함 |
 | F2. ML 예측 | `ml_predictor.py` | ✅ 완료 | XGBoost, 월별 stratified CV |
 | F3. 경제성 계산 | `economics_engine.py` | ✅ 완료 | 기력발전 BEP 추가 완료 |
 | F4. 이상치 탐지 | `anomaly_detector.py` | ✅ 완료 | 동적 임계값·3단계 분류 추가 |
 | F5. 가이던스 생성 | `guidance_generator.py` | ✅ 완료 | F5.1~F5.3 구현, run_daily_analysis 통합 |
-| F6. 자동 전파 | `mail_sender.py` | ✅ 완료 | Gmail SMTP, 정기+긴급 메일, config.py에 설정 |
+| F6. 자동 전파 | `mail_sender.py`, `kakao_sender.py` | ✅ 완료 | Gmail SMTP + 카카오톡 REST API |
 | F7. 운영 관리 | `run_scheduler.py` | ✅ 완료 | APScheduler 17:30~19:30, 통합 로그 |
 
 ---

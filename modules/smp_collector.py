@@ -384,13 +384,25 @@ def _parse_epower_excel(fpath: Path, target_date: date) -> list[float] | None:
                     return None
 
         # Row 4~27 (01시~24시) 에서 SMP 추출 — 두번째 열(col 1)
+        import math
         smp_list = []
+        nan_count = 0
         for row_idx in range(4, 28):
             try:
                 val = float(str(df.iloc[row_idx, 1]).replace(",", ""))
-                smp_list.append(val)
+                if math.isnan(val):
+                    nan_count += 1
+                    smp_list.append(0.0)
+                else:
+                    smp_list.append(val)
             except (ValueError, TypeError):
+                nan_count += 1
                 smp_list.append(0.0)
+
+        # nan/빈값이 과반수 이상이면 유효하지 않은 데이터로 판단
+        if nan_count > 12:
+            logger.warning(f"[ePower] SMP 데이터 부족: 24시간 중 {nan_count}개 누락 → 무효")
+            return None
 
         if len(smp_list) == 24:
             avg = sum(smp_list) / 24
@@ -429,18 +441,42 @@ def collect_smp(target_date: date | None = None) -> dict:
     SMP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = SMP_CACHE_DIR / f"smp_{date_str}.json"
 
-    # 이미 수집 완료된 캐시 확인
+    # 이미 수집 완료된 캐시 확인 (nan/0만 있는 무효 캐시는 무시)
     if cache_path.is_file():
         with open(cache_path, encoding="utf-8") as f:
             cached = json.load(f)
         if cached.get("updated"):
-            logger.info(f"[수집] {date_str} 이미 수집 완료 → 캐시 사용")
-            cached["source"] = "cache"
-            return cached
+            smp_vals = cached.get("smp", [])
+            import math
+            has_valid = any(
+                isinstance(v, (int, float)) and not math.isnan(v) and v != 0
+                for v in smp_vals
+            )
+            if has_valid:
+                logger.info(f"[수집] {date_str} 이미 수집 완료 → 캐시 사용")
+                cached["source"] = "cache"
+                return cached
+            else:
+                logger.warning(f"[수집] {date_str} 캐시 존재하나 유효 SMP 없음 → 재수집")
+                cache_path.unlink()  # 무효 캐시 삭제
 
     now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
-    # ── 1순위: KPX 웹 크롤링 ──────────────────────────────────
+    # ── 1순위: ePower 마켓 엑셀 (data/smp_excel/ 폴더) ─────────
+    logger.info(f"[수집] {date_str} ePower 마켓 엑셀 확인...")
+    smp_list = _scan_epower_excel(target_date)
+    if smp_list is not None:
+        result = {
+            "date": date_str, "smp": smp_list,
+            "source": "epower_excel", "updated": True,
+            "collected_at": now_str,
+        }
+        _save_cache(cache_path, result)
+        avg = sum(smp_list) / 24
+        logger.info(f"[수집 완료] {date_str} → ePower 엑셀 평균 SMP {avg:.2f} 원/kWh")
+        return result
+
+    # ── 2순위: KPX 웹 크롤링 (과거데이터 백필용) ──────────────────
     logger.info(f"[수집] {date_str} KPX 크롤링 시도...")
     table_data = _fetch_kpx_table()
 
@@ -468,7 +504,7 @@ def collect_smp(target_date: date | None = None) -> dict:
         else:
             logger.warning(f"[수집] KPX 테이블에 {date_str} 없음")
 
-    # ── 2순위: 공공데이터포털 API (하루전 SMP) ───────────────────
+    # ── 3순위: 공공데이터포털 API (하루전 SMP) ───────────────────
     logger.info(f"[수집] {date_str} 공공데이터포털 API 시도...")
     smp_list = _fetch_api_smp(target_date)
     if smp_list is not None:
@@ -480,20 +516,6 @@ def collect_smp(target_date: date | None = None) -> dict:
         _save_cache(cache_path, result)
         avg = sum(smp_list) / 24
         logger.info(f"[수집 완료] {date_str} → API 평균 SMP {avg:.2f} 원/kWh")
-        return result
-
-    # ── 3순위: ePower 마켓 엑셀 (data/smp_excel/ 폴더 감시) ────
-    logger.info(f"[수집] {date_str} ePower 마켓 엑셀 확인...")
-    smp_list = _scan_epower_excel(target_date)
-    if smp_list is not None:
-        result = {
-            "date": date_str, "smp": smp_list,
-            "source": "epower_excel", "updated": True,
-            "collected_at": now_str,
-        }
-        _save_cache(cache_path, result)
-        avg = sum(smp_list) / 24
-        logger.info(f"[수집 완료] {date_str} → ePower 엑셀 평균 SMP {avg:.2f} 원/kWh")
         return result
 
     logger.warning(

@@ -98,14 +98,17 @@ def send_mail(
 
     try:
         # TLS (587) 시도, 실패 시 SSL (465) 폴백
+        # local_hostname: Windows 호스트명에 공백이 포함되면 Gmail EHLO 거부 방지
         try:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30,
+                              local_hostname="localhost") as server:
                 server.starttls()
                 server.login(SENDER_EMAIL, SENDER_PASSWORD)
                 server.sendmail(SENDER_EMAIL, to_list, msg.as_string())
         except (smtplib.SMTPException, ConnectionError, OSError):
             logger.info("TLS 연결 실패, SSL(465)로 재시도...")
-            with smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=30) as server:
+            with smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=30,
+                                  local_hostname="localhost") as server:
                 server.login(SENDER_EMAIL, SENDER_PASSWORD)
                 server.sendmail(SENDER_EMAIL, to_list, msg.as_string())
         logger.info(f"메일 발송 완료: {subject} -> {to_list}")
@@ -132,70 +135,53 @@ def _build_chart_image(
 
         # 최적모드 BEP
         bep_vals = [p["bep"] if p["bep"] is not None else 0 for p in hourly_plan]
-        bar_colors = []
-        for p in hourly_plan:
-            action = p["action"]
-            if action == "가동":
-                bar_colors.append("#2ecc71")
-            elif action == "감발전환":
-                bar_colors.append("#f39c12")
-            elif action == "기력점화검토":
-                bar_colors.append("#3498db")
-            else:
-                bar_colors.append("#e74c3c")
 
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-        # BEP 막대
+        # BEP 막대 (파란색)
         fig.add_trace(
             go.Bar(
                 x=x_labels, y=bep_vals,
                 name="LNG발전 BEP ($/MMBtu)",
-                marker_color=bar_colors, opacity=0.6,
+                marker_color="#B4C7E7", opacity=0.85,
                 text=[f"{b:.1f}" for b in bep_vals],
                 textposition="outside", textfont=dict(size=9),
             ),
             secondary_y=True,
         )
 
-        # SMP 꺾은선
+        # SMP 꺾은선 (진한 파란색)
         fig.add_trace(
             go.Scatter(
                 x=x_labels, y=smp_series,
                 mode="lines+markers", name="SMP (원/kWh)",
-                line=dict(color="#e74c3c", width=3),
+                line=dict(color="#2F5597", width=3),
                 marker=dict(size=6),
             ),
             secondary_y=False,
         )
 
-        # LNG가격 점선
+        # LNG가격 점선 (주황색)
         fig.add_trace(
             go.Scatter(
                 x=x_labels, y=[lng_price] * 24,
                 mode="lines", name=f"LNG가격 {lng_price} $/MMBtu",
-                line=dict(color="#2c3e50", width=2.5, dash="dash"),
+                line=dict(color="#ED7D31", width=2.5, dash="dash"),
             ),
             secondary_y=True,
         )
 
-        # 감발 임계선
-        fig.add_trace(
-            go.Scatter(
-                x=x_labels, y=[thresholds["smp_low"]] * 24,
-                mode="lines", name=f"감발 임계 {thresholds['smp_low']:.0f}원",
-                line=dict(color="#e67e22", width=1.5, dash="dot"),
-            ),
-            secondary_y=False,
-        )
-
         fig.update_layout(
-            title="SMP vs LNG발전 BEP vs LNG가격",
+            title=dict(text="SMP vs LNG발전 BEP vs LNG가격", x=0.5, xanchor="center"),
             height=400, width=900,
+            plot_bgcolor="white",
+            paper_bgcolor="white",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
             margin=dict(t=80, b=60), bargap=0.3,
         )
-        fig.update_yaxes(title_text="SMP (원/kWh)", secondary_y=False)
+        fig.update_xaxes(showgrid=True, gridcolor="#E0E0E0")
+        fig.update_yaxes(title_text="SMP (원/kWh)", secondary_y=False,
+                         showgrid=True, gridcolor="#E0E0E0")
         fig.update_yaxes(title_text="BEP / LNG가격 ($/MMBtu)", secondary_y=True)
         fig.add_annotation(
             xref="paper", yref="paper", x=0.5, y=-0.15,
@@ -286,6 +272,8 @@ def send_daily_report(
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic',sans-serif;margin:20px;line-height:1.6">
 
+        <p>안녕하십니까, 금일 LNG발전 가동계획 송부드립니다.</p>
+
         <h2>1. {m1}월{d1}일 가동계획</h2>
 
         <h3>야간 ({m1}월{d1}일 22시 ~ {m2}월{d2}일 08시)</h3>
@@ -304,9 +292,7 @@ def send_daily_report(
         </p>
 
         <hr>
-        <p style="color:#aaa;font-size:0.75em">
-            LNG 발전 경제성 자동판단 시스템 | 자동 발송
-        </p>
+        <p>문의사항이 있으면 연락주시기 바랍니다. 감사합니다.</p>
     </body>
     </html>
     """
@@ -345,13 +331,15 @@ def send_daily_report(
 
     try:
         try:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30,
+                              local_hostname="localhost") as server:
                 server.starttls()
                 server.login(SENDER_EMAIL, SENDER_PASSWORD)
                 server.sendmail(SENDER_EMAIL, to_list, msg.as_string())
         except (smtplib.SMTPException, ConnectionError, OSError):
             logger.info("TLS 실패, SSL(465)로 재시도...")
-            with smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=30) as server:
+            with smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=30,
+                                  local_hostname="localhost") as server:
                 server.login(SENDER_EMAIL, SENDER_PASSWORD)
                 server.sendmail(SENDER_EMAIL, to_list, msg.as_string())
         logger.info(f"정기 리포트 발송 완료: {subject}")
@@ -364,6 +352,138 @@ def send_daily_report(
 # ──────────────────────────────────────────────────────────────
 # F6.2  긴급 알림 발송
 # ──────────────────────────────────────────────────────────────
+
+def send_multi_day_report(
+    daily_results: list[dict],
+    recipients: list[str] | None = None,
+) -> bool:
+    """
+    다중 날짜 정기 메일 발송 (금요일: 금~월 4일치 등).
+
+    daily_results: [{date, hourly_plan, daily_summary, smp_series, thresholds, ...}, ...]
+    """
+    if not daily_results:
+        return False
+
+    weekday_kr = ["월","화","수","목","금","토","일"]
+
+    first_date = daily_results[0]["date"]
+    last_date = daily_results[-1]["date"]
+    last_next = last_date + timedelta(days=1)
+
+    subject = (
+        f"[LNG가동계획] {first_date.month}/{first_date.day}"
+        f"~{last_next.month}/{last_next.day} 가동계획"
+    )
+
+    # 날짜별 가동계획 HTML 생성
+    plan_sections = ""
+    chart_images = []  # (cid, bytes)
+
+    night_hours = list(range(22, 24)) + list(range(0, 8))
+    day_hours = list(range(8, 22))
+
+    for idx, r in enumerate(daily_results):
+        d = r["date"]
+        d_next = d + timedelta(days=1)
+        m1, d1 = d.month, d.day
+        m2, d2 = d_next.month, d_next.day
+        wk = weekday_kr[d.weekday()]
+        plan = r["hourly_plan"]
+
+        night_html = _mode_ranges_html(plan, night_hours)
+        day_html = _mode_ranges_html(plan, day_hours)
+
+        chart_cid = f"smp_chart_{idx}"
+
+        plan_sections += f"""
+        <h2>{m1}월{d1}일({wk}) 가동계획</h2>
+        <h3>야간 ({m1}월{d1}일 22시 ~ {m2}월{d2}일 08시)</h3>
+        <ul style="font-size:1.05em">{night_html}</ul>
+        <h3>{m2}월{d2}일 주간 (08~22시)</h3>
+        <ul style="font-size:1.05em">{day_html}</ul>
+        <img src="cid:{chart_cid}" style="max-width:100%;height:auto" alt="SMP/BEP 차트 {d}">
+        <hr>
+        """
+
+        # 차트 생성
+        smp_series = r.get("smp_series")
+        thresholds = r.get("thresholds")
+        summary = r.get("daily_summary", {})
+        if smp_series and thresholds:
+            chart_bytes = _build_chart_image(
+                smp_series, plan,
+                summary.get("lng_price", 0),
+                thresholds,
+                summary.get("exchange_rate", 0),
+            )
+            if chart_bytes:
+                chart_images.append((chart_cid, chart_bytes))
+
+    first_summary = daily_results[0].get("daily_summary", {})
+    lng_price = first_summary.get("lng_price", "")
+    exchange_rate = first_summary.get("exchange_rate", "")
+    price_type = first_summary.get("price_type", "")
+    lng_heat = first_summary.get("lng_heat", "")
+
+    html = f"""
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="font-family:'Malgun Gothic',sans-serif;margin:20px;line-height:1.6">
+
+        <p>안녕하십니까, LNG발전 가동계획 송부드립니다.</p>
+
+        {plan_sections}
+
+        <p style="color:#888;font-size:0.85em">
+            * 환율: {exchange_rate:,.0f} 원/$ | LNG가격: {lng_price} $/MMBtu ({price_type})
+            | 열량: {lng_heat} Mcal/Nm3
+        </p>
+
+        <p>문의사항이 있으면 연락주시기 바랍니다. 감사합니다.</p>
+    </body>
+    </html>
+    """
+
+    to_list = recipients or RECIPIENTS
+    if not to_list or not SENDER_EMAIL or not SENDER_PASSWORD:
+        logger.warning("메일 설정 미완료.")
+        return False
+
+    msg = MIMEMultipart("related")
+    msg["Subject"] = subject
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = ", ".join(to_list)
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(html, "html", "utf-8"))
+    msg.attach(alt)
+
+    for cid, img_bytes in chart_images:
+        img_part = MIMEImage(img_bytes, _subtype="png")
+        img_part.add_header("Content-ID", f"<{cid}>")
+        img_part.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
+        msg.attach(img_part)
+
+    try:
+        try:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30,
+                              local_hostname="localhost") as server:
+                server.starttls()
+                server.login(SENDER_EMAIL, SENDER_PASSWORD)
+                server.sendmail(SENDER_EMAIL, to_list, msg.as_string())
+        except (smtplib.SMTPException, ConnectionError, OSError):
+            logger.info("TLS 실패, SSL(465)로 재시도...")
+            with smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=30,
+                                  local_hostname="localhost") as server:
+                server.login(SENDER_EMAIL, SENDER_PASSWORD)
+                server.sendmail(SENDER_EMAIL, to_list, msg.as_string())
+        logger.info(f"다중 날짜 리포트 발송 완료: {subject}")
+        return True
+    except Exception as e:
+        logger.error(f"다중 날짜 리포트 발송 실패: {e}")
+        return False
+
 
 def send_urgent_alert(
     target_date: date,

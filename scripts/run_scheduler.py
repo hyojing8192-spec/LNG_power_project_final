@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -50,9 +51,9 @@ from economics_engine import build_hourly_table, get_elec_price
 from anomaly_detector import calc_smp_thresholds
 from ml_predictor import load_data, load_models, predict_day
 from guidance_generator import generate_full_guidance, format_kakao_message_multi
-from mail_sender import send_daily_report, send_urgent_alert, _is_configured
+from mail_sender import send_daily_report, send_multi_day_report, send_urgent_alert, _is_configured
 from kakao_sender import send_kakao_guidance
-from kmos_smp_download import get_target_dates
+from kmos_smp_download import get_target_dates, download_multi_dates
 from config import DEFAULT_LNG_PRICE, DEFAULT_LNG_HEAT, FALLBACK_EXCHANGE_RATE
 
 
@@ -70,6 +71,15 @@ def run_pipeline(target_date: date | None = None, lng_price: float = DEFAULT_LNG
 
     logger.info(f"===== 파이프라인 시작: {target_date} =====")
 
+    # ── 0. ePower 마켓에서 SMP 엑셀 자동 다운로드 ──────────────
+    logger.info("[0/5] ePower 마켓 KMOS SMP 다운로드...")
+    try:
+        from kmos_smp_download import download_smp_from_kmos
+        download_smp_from_kmos()
+        logger.info("  KMOS 다운로드 완료")
+    except Exception as e:
+        logger.warning(f"  KMOS 다운로드 실패 (수동 엑셀로 대체): {e}")
+
     # ── 1. SMP 수집 ───────────────────────────────────
     logger.info("[1/5] SMP 수집 중...")
     try:
@@ -79,8 +89,13 @@ def run_pipeline(target_date: date | None = None, lng_price: float = DEFAULT_LNG
         status = "실시간" if smp_result["updated"] else "폴백(전일)"
         logger.info(f"  SMP 수집 완료: {smp_result['source']} ({status}), 평균 {avg_smp:.1f}원")
 
-        if not smp_result["updated"]:
-            logger.warning("  실제 SMP 미수집 - 전일 데이터로 분석")
+        # SMP 실데이터가 없으면 전파하지 않음
+        has_real_smp = smp_result.get("updated", False) and not all(
+            (v == 0 or (isinstance(v, float) and math.isnan(v))) for v in smp_series
+        )
+        if not has_real_smp:
+            logger.warning(f"  SMP 실데이터 없음 ({smp_result['source']}) → 분석·전파 생략, 다음 스케줄에서 재시도")
+            return False
     except Exception as e:
         logger.error(f"  SMP 수집 실패: {e}")
         return False
@@ -231,6 +246,14 @@ def run_pipeline_multi(
     logger.info(f"===== 다중 날짜 파이프라인 시작: {base_date} ({weekdays_kr[base_date.weekday()]}) =====")
     logger.info(f"  대상 날짜: {len(target_dates)}일 - {[str(d) for d in target_dates]}")
 
+    # ── 0. ePower 마켓에서 SMP 엑셀 자동 다운로드 ──────────────
+    logger.info("[0] ePower 마켓 KMOS SMP 다운로드...")
+    try:
+        download_multi_dates(base_date)
+        logger.info("  KMOS 다운로드 완료")
+    except Exception as e:
+        logger.warning(f"  KMOS 다운로드 실패 (수동 엑셀로 대체): {e}")
+
     # 고정변수 1회 로드
     logger.info("[1] 고정변수 설정...")
     try:
@@ -270,6 +293,14 @@ def run_pipeline_multi(
             smp_series = smp_result["smp"]
             avg_smp = sum(smp_series) / 24
             logger.info(f"  SMP: {smp_result['source']}, 평균 {avg_smp:.1f}원")
+
+            # SMP 실데이터가 없으면 (폴백/nan) 분석·전파 건너뛰기
+            has_real_smp = smp_result.get("updated", False) and not all(
+                (v == 0 or (isinstance(v, float) and math.isnan(v))) for v in smp_series
+            )
+            if not has_real_smp:
+                logger.warning(f"  {d_label} SMP 실데이터 없음 ({smp_result['source']}) → 전파 생략, 다음 스케줄에서 재시도")
+                continue
 
             pred_results = predict_day(
                 models, target_d, smp_series,
@@ -336,16 +367,19 @@ def run_pipeline_multi(
     except Exception as e:
         logger.error(f"  카카오톡 발송 실패: {e}")
 
-    # 이메일 (첫 번째 날짜 기준 리포트)
+    # 이메일 (다중 날짜면 전체, 단일이면 기존 방식)
     if _is_configured() and daily_results:
         try:
-            first = daily_results[0]
-            send_daily_report(
-                first["date"], first["daily_summary"], all_alerts,
-                first["hourly_plan"], first["hourly_df"],
-                first["text_report"],
-                smp_series=first["smp_series"], thresholds=first["thresholds"],
-            )
+            if len(daily_results) > 1:
+                send_multi_day_report(daily_results)
+            else:
+                first = daily_results[0]
+                send_daily_report(
+                    first["date"], first["daily_summary"], all_alerts,
+                    first["hourly_plan"], first["hourly_df"],
+                    first["text_report"],
+                    smp_series=first["smp_series"], thresholds=first["thresholds"],
+                )
             logger.info("  이메일 발송 완료")
         except Exception as e:
             logger.error(f"  이메일 발송 실패: {e}")
@@ -399,9 +433,10 @@ def start_scheduler():
         logger.info(f"  스케줄 등록: 매일 {t}")
 
     logger.info("스케줄러 시작. Ctrl+C로 종료.")
-    logger.info(f"다음 실행 예정:")
+    logger.info("다음 실행 예정:")
     for job in scheduler.get_jobs():
-        logger.info(f"  {job.id}: {job.next_run_time}")
+        next_time = getattr(job, 'next_run_time', None) or getattr(job, 'next_fire_time', None)
+        logger.info(f"  {job.id}: {next_time}")
 
     try:
         scheduler.start()
