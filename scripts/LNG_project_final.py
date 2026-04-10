@@ -48,11 +48,12 @@ st.title("⚡ LNG발전 최적 가이던스 제공 프로그램")
 st.caption("SMP 기반 운전모드 최적화 · ML 예측 · 이상구간 탐지")
 
 # 자동 새로고침 (5분 간격) — 스케줄러가 새 데이터 저장 시 반영
+# 1분 자동 새로고침 — 스케줄러가 새 데이터 저장 시 빠르게 반영
 try:
     from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=300_000, limit=None, key="data_refresh")
+    _refresh_count = st_autorefresh(interval=60_000, limit=None, key="data_refresh")
 except ImportError:
-    pass
+    _refresh_count = 0
 
 # ── 스케줄러 상태 API 서버 시작 (백그라운드) ─────────────────
 try:
@@ -214,6 +215,23 @@ def _prev_workday(d):
 
 _today = date.today()
 _default_date = _today if not _is_holiday_check(_today) else _prev_workday(_today)
+
+# 최신 경제성분석 CSV 날짜 확인 → 자동으로 해당 날짜 표시
+import glob as _glob
+_latest_csv_date = _default_date
+_csv_files = sorted(_glob.glob(str(_ROOT / "data" / "경제성분석_*.csv")))
+if _csv_files:
+    try:
+        _latest_name = Path(_csv_files[-1]).stem  # 경제성분석_2026-04-10
+        _latest_csv_date_str = _latest_name.replace("경제성분석_", "")
+        _latest_csv_date_parsed = date.fromisoformat(_latest_csv_date_str)
+        # CSV 날짜가 영업일이면 그걸 기본값으로
+        if not _is_holiday_check(_latest_csv_date_parsed):
+            _default_date = _latest_csv_date_parsed
+        else:
+            _default_date = _prev_workday(_latest_csv_date_parsed)
+    except Exception:
+        pass
 
 _picked_date = st.sidebar.date_input("분석 기준일", value=_default_date)
 
