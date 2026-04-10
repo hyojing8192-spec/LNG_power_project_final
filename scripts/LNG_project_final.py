@@ -69,6 +69,7 @@ except Exception:
 
 # ── 스케줄러 상태 표시 (우측 상단, CSS 깜빡임) ──────────────
 import subprocess as _sp
+import platform
 
 def _check_scheduler_status():
     """running | fetching | stopped"""
@@ -101,50 +102,53 @@ def _check_scheduler_status():
     return "running"
 
 _sched_status = _check_scheduler_status()
-_STATUS_CFG = {
-    "running":  ("#28a745", "스케줄러 정상 가동중"),
-    "fetching": ("#FF8C00", "SMP 데이터 수집중"),
-    "stopped":  ("#dc3545", "스케줄러 미실행"),
-}
-_sc_color, _sc_label = _STATUS_CFG.get(_sched_status, _STATUS_CFG["stopped"])
 
-st.markdown(f"""
-<style>
-@keyframes sched-blink {{
-    0%, 100% {{ opacity: 1; }}
-    50% {{ opacity: 0.25; }}
-}}
-.sched-badge {{
-    position: fixed;
-    top: 14px;
-    right: 20px;
-    z-index: 999999;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: rgba(255,255,255,0.97);
-    padding: 7px 16px;
-    border-radius: 20px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.13);
-    font-size: 0.82em;
-    font-weight: 700;
-    color: {_sc_color};
-    animation: sched-blink 1.4s ease-in-out infinite;
-    pointer-events: none;
-}}
-.sched-badge-dot {{
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    background: {_sc_color};
-    flex-shrink: 0;
-}}
-</style>
-<div class="sched-badge">
-    <div class="sched-badge-dot"></div>
-    {_sc_label}
-</div>
-""", unsafe_allow_html=True)
+# 로컬(Windows)에서만 스케줄러 인디케이터 표시, Cloud(Linux)에서는 숨김
+if _sched_status != "stopped" or platform.system() == "Windows":
+    _STATUS_CFG = {
+        "running":  ("#28a745", "스케줄러 정상 가동중"),
+        "fetching": ("#FF8C00", "SMP 데이터 수집중"),
+        "stopped":  ("#dc3545", "스케줄러 미실행"),
+    }
+    _sc_color, _sc_label = _STATUS_CFG.get(_sched_status, _STATUS_CFG["stopped"])
+
+    st.markdown(f"""
+    <style>
+    @keyframes sched-blink {{
+        0%, 100% {{ opacity: 1; }}
+        50% {{ opacity: 0.25; }}
+    }}
+    .sched-badge {{
+        position: fixed;
+        top: 14px;
+        right: 20px;
+        z-index: 999999;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(255,255,255,0.97);
+        padding: 7px 16px;
+        border-radius: 20px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.13);
+        font-size: 0.82em;
+        font-weight: 700;
+        color: {_sc_color};
+        animation: sched-blink 1.4s ease-in-out infinite;
+        pointer-events: none;
+    }}
+    .sched-badge-dot {{
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: {_sc_color};
+        flex-shrink: 0;
+    }}
+    </style>
+    <div class="sched-badge">
+        <div class="sched-badge-dot"></div>
+        {_sc_label}
+    </div>
+    """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────────────────────
 # 데이터 로드 및 ML 모델 준비 (사이드바보다 먼저 — 열량·환율 추출용)
