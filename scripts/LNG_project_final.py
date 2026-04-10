@@ -189,7 +189,66 @@ else:
 # ──────────────────────────────────────────────────────────────
 st.sidebar.header("📋 설정")
 
-target_date = st.sidebar.date_input("분석 날짜", value=date.today())
+# 영업일만 선택 가능한 날짜 목록 생성 (오늘 기준 ±60일)
+from config import LEGAL_HOLIDAYS
+from datetime import timedelta as _timedelta
+
+def _is_holiday_check(d):
+    """주말 또는 공휴일 여부."""
+    if d in LEGAL_HOLIDAYS:
+        return True
+    return d.weekday() >= 5
+
+_today = date.today()
+# 오늘이 주말/공휴일이면 직전 영업일을 기본값으로
+_default_date = _today
+while _is_holiday_check(_default_date):
+    _default_date = _default_date - _timedelta(days=1)
+
+# 영업일 목록 생성
+_workdays = []
+for i in range(-60, 61):
+    d = _today + _timedelta(days=i)
+    if not _is_holiday_check(d):
+        _workdays.append(d)
+
+_weekday_kr_map = ["월","화","수","목","금","토","일"]
+_workday_labels = {d: f"{d.month}/{d.day}({_weekday_kr_map[d.weekday()]})" for d in _workdays}
+
+# 기본 인덱스
+_default_idx = 0
+for i, d in enumerate(_workdays):
+    if d == _default_date:
+        _default_idx = i
+        break
+
+selected_date = st.sidebar.selectbox(
+    "분석 기준일 (영업일)",
+    options=_workdays,
+    index=_default_idx,
+    format_func=lambda d: _workday_labels[d],
+)
+target_date = selected_date
+
+# 대상 날짜 계산 (get_target_dates 로직)
+def _get_display_dates(base_date):
+    """기준일에 따른 표시 대상 날짜 목록. 당일 + 연속 휴일 + 다음 영업일."""
+    dates = [base_date]
+    next_d = base_date + _timedelta(days=1)
+    dates.append(next_d)
+    if _is_holiday_check(next_d):
+        d = next_d
+        while True:
+            d = d + _timedelta(days=1)
+            dates.append(d)
+            if not _is_holiday_check(d):
+                break
+    return sorted(set(dates))
+
+_display_dates = _get_display_dates(target_date)
+_display_str = ", ".join(f"{d.month}/{d.day}({_weekday_kr_map[d.weekday()]})" for d in _display_dates)
+st.sidebar.caption(f"대상 날짜: **{_display_str}**")
+
 lng_price = st.sidebar.number_input(
     "LNG 가격 ($/MMBtu)", value=DEFAULT_LNG_PRICE, min_value=0.0, step=0.5, format="%.2f"
 )
@@ -199,62 +258,59 @@ st.sidebar.markdown("---")
 st.sidebar.caption(f"LNG 열량: **{lng_heat}** Mcal/Nm³ (학습데이터 평균)")
 st.sidebar.caption(f"환율: **{exchange_rate:,.2f}** 원/$ (전일 평균)")
 
-# SMP 추출: 수집 캐시 우선 → ePower 엑셀 → 학습 데이터 폴백
+# ── SMP 다중 날짜 로드 함수 ──────────────────────────────────
 import math as _math
-smp_series = None
-smp_source = ""
 
-# 1순위: smp_collector가 수집한 캐시 (data/smp_cache/)
-cached = load_cached_smp(target_date)
-if cached and len(cached.get("smp", [])) == 24:
-    _smp_vals = cached["smp"]
-    _has_valid = any(
-        isinstance(v, (int, float)) and not _math.isnan(v) and v > 0
-        for v in _smp_vals
-    )
-    if _has_valid:
-        smp_series = _smp_vals
-        smp_source = f"수집 캐시 ({cached.get('source', '')})"
+def _load_smp_for_date(d):
+    """날짜별 SMP 로드. (smp_list, source, has_real) 반환."""
+    smp = None
+    src = ""
+    # 캐시
+    cached = load_cached_smp(d)
+    if cached and len(cached.get("smp", [])) == 24:
+        vals = cached["smp"]
+        if any(isinstance(v, (int, float)) and not _math.isnan(v) and v > 0 for v in vals):
+            smp = vals
+            src = f"캐시({cached.get('source', '')})"
+    # ePower 엑셀
+    if smp is None:
+        try:
+            from smp_collector import _scan_epower_excel
+            vals = _scan_epower_excel(d)
+            if vals and len(vals) == 24:
+                smp = vals
+                src = "ePower 엑셀"
+        except Exception:
+            pass
+    # 학습 데이터
+    if smp is None and data_loaded and "smp" in raw_df.columns and "datetime" in raw_df.columns:
+        df_day = raw_df[raw_df["datetime"].dt.date == d]
+        if len(df_day) >= 24:
+            smp = df_day["smp"].head(24).tolist()
+            src = "학습데이터"
+    has_real = smp is not None
+    if smp is None:
+        smp = [float('nan')] * 24
+        src = "미공시"
+    return smp, src, has_real
 
-# 1-2순위: ePower 엑셀에서 직접 읽기 (캐시에 없을 때)
-if smp_series is None:
-    try:
-        from smp_collector import _scan_epower_excel
-        _excel_smp = _scan_epower_excel(target_date)
-        if _excel_smp and len(_excel_smp) == 24:
-            smp_series = _excel_smp
-            smp_source = "ePower 엑셀"
-    except Exception:
-        pass
+# 대상 날짜별 SMP 로드
+_all_smp = {}
+for _d in _display_dates:
+    _all_smp[_d] = _load_smp_for_date(_d)
 
-# 2순위: 학습 데이터에서 해당 날짜 (정확히 일치하는 날짜만)
-if smp_series is None and data_loaded and "smp" in raw_df.columns and "datetime" in raw_df.columns:
-    df_day = raw_df[raw_df["datetime"].dt.date == target_date]
-    if len(df_day) >= 24:
-        smp_series = df_day["smp"].head(24).tolist()
-        smp_source = "학습 데이터"
-    # 해당 날짜 데이터가 없으면 폴백하지 않음 (다른 날짜 데이터를 넣지 않음)
+# 기준일(D일) SMP
+smp_series, smp_source, _has_real_smp = _all_smp[target_date]
 
-# SMP 실데이터 존재 여부 플래그 (캐시/엑셀/학습데이터에서 가져온 경우만 True)
-_has_real_smp = smp_series is not None
-
-if smp_series is None:
-    smp_series = [float('nan')] * 24
-    smp_source = "SMP 미공시 (산출불가)"
-
-# 수집 가능 날짜 표시
+# 사이드바 상태 표시
 cached_dates = list_cached_dates()
 st.sidebar.markdown("---")
 if cached_dates:
     st.sidebar.caption(f"SMP 수집 완료: {cached_dates[-1]} 까지 ({len(cached_dates)}일)")
-st.sidebar.caption(f"SMP 소스: **{smp_source}**")
-
-# 스케줄러 저장 CSV 존재 여부
-_csv_path = _ROOT / "data" / f"경제성분석_{target_date}.csv"
-if _csv_path.exists():
-    st.sidebar.success(f"경제성분석 CSV 존재 ({target_date})")
-else:
-    st.sidebar.info(f"경제성분석 CSV 미생성 ({target_date}) — 스케줄러 실행 후 자동 생성")
+for _d in _display_dates:
+    _s, _src, _ok = _all_smp[_d]
+    _icon = "🟢" if _ok else "🔴"
+    st.sidebar.caption(f"{_icon} {_d.month}/{_d.day}: {_src}")
 
 # ══════════════════════════════════════════════════════════════
 # 종합화면 (메인)
@@ -567,19 +623,7 @@ if data_loaded and _has_real_smp:
         table_df = pd.DataFrame(rows, index=col_headers).T
         return table_df
 
-    # ── 야간 테이블 (D일 22시 ~ D+1일 07시) ─────────────
-    NIGHT_HOURS = list(range(22, 24)) + list(range(0, 8))
-    DAY_HOURS = list(range(8, 22))
-
-    next_weekday_kr = ["월","화","수","목","금","토","일"][next_date.weekday()]
-    st.markdown(
-        f'<div class="section-title">야간 {target_date.month}월{target_date.day}일({weekday_kr}) 22시 ~ '
-        f'{next_date.month}월{next_date.day}일({next_weekday_kr}) 08시</div>',
-        unsafe_allow_html=True,
-    )
-    night_table = _build_summary_table(NIGHT_HOURS, mixed_dates=True)
-
-    # 모드 행에 색상 적용
+    # ── 모드 행 색상 스타일 함수 ────────────────────────────
     def _style_summary(df):
         styles = pd.DataFrame("", index=df.index, columns=df.columns)
         if "최적운전모드" in df.index:
@@ -595,21 +639,128 @@ if data_loaded and _has_real_smp:
                     styles.loc["최적운전모드", col] = "background-color: #F8D7DA; font-weight: bold"
         return styles
 
-    st.dataframe(
-        night_table.style.apply(_style_summary, axis=None),
-        use_container_width=True, height=280,
-    )
+    NIGHT_HOURS = list(range(22, 24)) + list(range(0, 8))
+    DAY_HOURS = list(range(8, 22))
 
-    # ── 주간 테이블 (D+1일 08시 ~ 21시) ─────────────────
-    st.markdown(
-        f'<div class="section-title">주간 {next_date.month}월{next_date.day}일({next_weekday_kr}) 08시 ~ 22시</div>',
-        unsafe_allow_html=True,
-    )
-    day_table = _build_summary_table(DAY_HOURS, mixed_dates=False)
-    st.dataframe(
-        day_table.style.apply(_style_summary, axis=None),
-        use_container_width=True, height=280,
-    )
+    # ── 다중 날짜 가동계획 표시 (날짜쌍 루프) ─────────────
+    # _display_dates에서 연속 날짜쌍 생성: (D일 야간 22시~, D+1일 주간 ~22시)
+    _date_pairs = []
+    for i in range(len(_display_dates) - 1):
+        _date_pairs.append((_display_dates[i], _display_dates[i + 1]))
+
+    for _d_night, _d_day in _date_pairs:
+        _wk_night = _weekday_kr_map[_d_night.weekday()]
+        _wk_day = _weekday_kr_map[_d_day.weekday()]
+
+        _smp_night, _src_night, _ok_night = _all_smp[_d_night]
+        _smp_day, _src_day, _ok_day = _all_smp[_d_day]
+
+        # ── 야간 테이블 ──
+        st.markdown(
+            f'<div class="section-title">야간 {_d_night.month}월{_d_night.day}일({_wk_night}) 22시 ~ '
+            f'{_d_day.month}월{_d_day.day}일({_wk_day}) 08시</div>',
+            unsafe_allow_html=True,
+        )
+
+        if _ok_night:
+            # 야간: 22~23시=D일 SMP, 00~07시=D+1일 SMP
+            _night_rows = {"최적운전모드": [], "SMP(원/kWh)": [], "수전단가(원/kWh)": [],
+                           "대체단가(원/kWh)": [], "LNG발전 BEP($/MMBtu)": [], "경제성(억원)": []}
+            _night_headers = [f"{h:02d}시" for h in NIGHT_HOURS]
+            MODE_DISPLAY = {"2기": "2기 full", "2기저부하": "2기 저부하", "1기": "1기 full", "정지": "정지"}
+
+            # D일 기준 가이던스
+            _g_night = generate_full_guidance(
+                target_date=_d_night, hourly_df=hourly_df,
+                smp_series=_smp_night, thresholds=thresholds,
+                lng_price=lng_price, exchange_rate=exchange_rate,
+                lng_heat=lng_heat, is_spot=is_spot,
+            )
+            _plan_night = _g_night["hourly_plan"]
+
+            for h in NIGHT_HOURS:
+                if h >= 22:
+                    smp_val = _smp_night[h]
+                    avail = True
+                else:
+                    if _ok_day:
+                        smp_val = _smp_day[h]
+                        avail = True
+                    else:
+                        avail = False
+
+                if not avail:
+                    for k in _night_rows:
+                        _night_rows[k].append("-")
+                    continue
+
+                p = _plan_night[h]
+                _night_rows["최적운전모드"].append(MODE_DISPLAY.get(p["best_mode"], p["best_mode"]))
+                _night_rows["SMP(원/kWh)"].append(f"{smp_val:.1f}")
+                _night_rows["수전단가(원/kWh)"].append(f"{hourly_df['수전단가(원/kWh)'].iloc[h]:.1f}")
+                _night_rows["LNG발전 BEP($/MMBtu)"].append(f"{p['bep']:.2f}" if p['bep'] else "-")
+                _night_rows["경제성(억원)"].append(f"{p['econ_bil']:.3f}" if p['econ_bil'] else "-")
+                mode = p["best_mode"]
+                elec_val = hourly_df['수전단가(원/kWh)'].iloc[h]
+                if mode == "2기":
+                    _night_rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
+                elif mode in ("2기저부하", "1기"):
+                    _night_rows["대체단가(원/kWh)"].append(f"{elec_val:.1f}")
+                else:
+                    _night_rows["대체단가(원/kWh)"].append("-")
+
+            _night_df = pd.DataFrame(_night_rows, index=_night_headers).T
+            st.dataframe(_night_df.style.apply(_style_summary, axis=None),
+                         use_container_width=True, height=280)
+        else:
+            st.info(f"{_d_night.month}/{_d_night.day} SMP 미공시 — 산출불가")
+
+        # ── 주간 테이블 ──
+        st.markdown(
+            f'<div class="section-title">주간 {_d_day.month}월{_d_day.day}일({_wk_day}) 08시 ~ 22시</div>',
+            unsafe_allow_html=True,
+        )
+
+        if _ok_day:
+            _day_rows = {"최적운전모드": [], "SMP(원/kWh)": [], "수전단가(원/kWh)": [],
+                         "대체단가(원/kWh)": [], "LNG발전 BEP($/MMBtu)": [], "경제성(억원)": []}
+            _day_headers = [f"{h:02d}시" for h in DAY_HOURS]
+
+            # D+1일 기준 가이던스 (D+1 SMP로 계산)
+            _pred_day = predict_day(models, _d_day, _smp_day, lng_price, lng_heat, exchange_rate, elec_price_fn=get_elec_price)
+            _hourly_day = build_hourly_table(target_date=_d_day, smp_series=_smp_day, lng_price=lng_price,
+                                             lng_heat=lng_heat, exchange_rate=exchange_rate, pred_results=_pred_day,
+                                             is_spot=is_spot, smp_high_threshold=thresholds["smp_high"])
+            _g_day = generate_full_guidance(
+                target_date=_d_day, hourly_df=_hourly_day,
+                smp_series=_smp_day, thresholds=thresholds,
+                lng_price=lng_price, exchange_rate=exchange_rate,
+                lng_heat=lng_heat, is_spot=is_spot,
+            )
+            _plan_day = _g_day["hourly_plan"]
+
+            for h in DAY_HOURS:
+                smp_val = _smp_day[h]
+                p = _plan_day[h]
+                _day_rows["최적운전모드"].append(MODE_DISPLAY.get(p["best_mode"], p["best_mode"]))
+                _day_rows["SMP(원/kWh)"].append(f"{smp_val:.1f}")
+                _day_rows["수전단가(원/kWh)"].append(f"{_hourly_day['수전단가(원/kWh)'].iloc[h]:.1f}")
+                _day_rows["LNG발전 BEP($/MMBtu)"].append(f"{p['bep']:.2f}" if p['bep'] else "-")
+                _day_rows["경제성(억원)"].append(f"{p['econ_bil']:.3f}" if p['econ_bil'] else "-")
+                mode = p["best_mode"]
+                elec_val = _hourly_day['수전단가(원/kWh)'].iloc[h]
+                if mode == "2기":
+                    _day_rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
+                elif mode in ("2기저부하", "1기"):
+                    _day_rows["대체단가(원/kWh)"].append(f"{elec_val:.1f}")
+                else:
+                    _day_rows["대체단가(원/kWh)"].append("-")
+
+            _day_df = pd.DataFrame(_day_rows, index=_day_headers).T
+            st.dataframe(_day_df.style.apply(_style_summary, axis=None),
+                         use_container_width=True, height=280)
+        else:
+            st.info(f"{_d_day.month}/{_d_day.day} SMP 미공시 — 산출불가")
 
     st.markdown("---")
 
