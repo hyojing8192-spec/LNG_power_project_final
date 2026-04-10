@@ -356,22 +356,9 @@ if data_loaded and _has_real_smp:
             else:
                 bep_vals.append(0)
         else:
-            # D+1일 00~21시
+            # D+1일 00~21시: D+1 SMP가 있어야 표시 (일자별 데이터)
             x_labels.append(f"{m2}/{d2} {h:02d}시")
-            if h < 8:
-                # 야간(00~07시): D일 SMP 기준 (오늘 공시 SMP로 판단)
-                smp_chart.append(smp_series[h])
-                mode = best_mode_col.iloc[h]
-                if mode == "1기":
-                    bep_vals.append(hourly_df["BEP_1기($/MMBtu)"].iloc[h])
-                elif mode == "2기저부하":
-                    bep_vals.append(hourly_df["BEP_2기저부하($/MMBtu)"].iloc[h])
-                elif mode == "2기":
-                    bep_vals.append(hourly_df["BEP_2기($/MMBtu)"].iloc[h])
-                else:
-                    bep_vals.append(0)
-            elif _has_next_smp:
-                # 주간(08~21시): D+1 SMP가 있을 때만 표시
+            if _has_next_smp:
                 smp_chart.append(_next_smp[h])
                 mode = best_mode_col.iloc[h]
                 if mode == "1기":
@@ -383,7 +370,6 @@ if data_loaded and _has_real_smp:
                 else:
                     bep_vals.append(0)
             else:
-                # 주간 D+1 SMP 없음 → 공란
                 smp_chart.append(None)
                 bep_vals.append(None)
 
@@ -429,11 +415,11 @@ if data_loaded and _has_real_smp:
     st.plotly_chart(fig_main, use_container_width=True)
 
     # ── 종합 테이블 생성 함수 ────────────────────────────
-    def _build_summary_table(hours: list[int], use_next_smp: bool = False):
+    def _build_summary_table(hours: list[int], mixed_dates: bool = False):
         """시간을 열, 항목을 행으로 하는 종합 테이블 생성.
 
-        야간(22~07시): D일 SMP 기준으로 판단 (오늘 공시 SMP)
-        주간(08~21시): use_next_smp=True → D+1 SMP가 있으면 사용, 없으면 공란
+        mixed_dates=True (야간): 22~23시는 D일 SMP, 00~07시는 D+1일 SMP
+        mixed_dates=False (주간): 전체가 D+1일 SMP
         """
         guidance_local = generate_full_guidance(
             target_date=target_date, hourly_df=hourly_df,
@@ -450,8 +436,21 @@ if data_loaded and _has_real_smp:
                 "대체단가(원/kWh)": [], "LNG발전 BEP($/MMBtu)": [], "경제성(억원)": []}
 
         for h in hours:
-            # 주간 테이블에서 D+1 SMP 필요한데 없으면 공란
-            if use_next_smp and not _has_next_smp:
+            # 일자 기준으로 SMP 매칭: 22~23시=D일, 00~21시=D+1일
+            is_d_day = (h >= 22)  # 22~23시는 D일
+            if is_d_day:
+                # D일 SMP (항상 있음)
+                smp_val = smp_series[h]
+                data_available = True
+            else:
+                # D+1일 SMP (없을 수 있음)
+                if _has_next_smp:
+                    smp_val = _next_smp[h]
+                    data_available = True
+                else:
+                    data_available = False
+
+            if not data_available:
                 rows["최적운전모드"].append("-")
                 rows["SMP(원/kWh)"].append("-")
                 rows["수전단가(원/kWh)"].append("-")
@@ -462,8 +461,6 @@ if data_loaded and _has_real_smp:
 
             rows["최적운전모드"].append(
                 MODE_DISPLAY.get(plan[h]["best_mode"], plan[h]["best_mode"]))
-
-            smp_val = smp_series[h]
             rows["SMP(원/kWh)"].append(
                 f"{smp_val:.1f}" if isinstance(smp_val, (int, float)) and smp_val == smp_val else "-")
             rows["수전단가(원/kWh)"].append(f"{hourly_df['수전단가(원/kWh)'].iloc[h]:.1f}")
@@ -493,7 +490,7 @@ if data_loaded and _has_real_smp:
         f"{next_date.month}월{next_date.day}일 08시</h3>",
         unsafe_allow_html=True,
     )
-    night_table = _build_summary_table(NIGHT_HOURS, use_next_smp=False)
+    night_table = _build_summary_table(NIGHT_HOURS, mixed_dates=True)
 
     # 모드 행에 색상 적용
     def _style_summary(df):
@@ -522,7 +519,7 @@ if data_loaded and _has_real_smp:
         f"<h3 style='text-align:center'>주간 {next_date.month}월{next_date.day}일({next_weekday}) 08시 ~ 22시</h3>",
         unsafe_allow_html=True,
     )
-    day_table = _build_summary_table(DAY_HOURS, use_next_smp=True)
+    day_table = _build_summary_table(DAY_HOURS, mixed_dates=False)
     st.dataframe(
         day_table.style.apply(_style_summary, axis=None),
         use_container_width=True, height=280,
