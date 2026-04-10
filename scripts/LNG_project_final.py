@@ -356,11 +356,23 @@ if data_loaded and _has_real_smp:
             else:
                 bep_vals.append(0)
         else:
-            # D+1일 00~21시: D+1 SMP가 있을 때만 표시
+            # D+1일 00~21시
             x_labels.append(f"{m2}/{d2} {h:02d}시")
-            if _has_next_smp:
+            if h < 8:
+                # 야간(00~07시): D일 SMP 기준 (오늘 공시 SMP로 판단)
+                smp_chart.append(smp_series[h])
+                mode = best_mode_col.iloc[h]
+                if mode == "1기":
+                    bep_vals.append(hourly_df["BEP_1기($/MMBtu)"].iloc[h])
+                elif mode == "2기저부하":
+                    bep_vals.append(hourly_df["BEP_2기저부하($/MMBtu)"].iloc[h])
+                elif mode == "2기":
+                    bep_vals.append(hourly_df["BEP_2기($/MMBtu)"].iloc[h])
+                else:
+                    bep_vals.append(0)
+            elif _has_next_smp:
+                # 주간(08~21시): D+1 SMP가 있을 때만 표시
                 smp_chart.append(_next_smp[h])
-                # D+1은 별도 경제성 계산이 없으므로 D일 모델 기준 BEP 사용
                 mode = best_mode_col.iloc[h]
                 if mode == "1기":
                     bep_vals.append(hourly_df["BEP_1기($/MMBtu)"].iloc[h])
@@ -371,6 +383,7 @@ if data_loaded and _has_real_smp:
                 else:
                     bep_vals.append(0)
             else:
+                # 주간 D+1 SMP 없음 → 공란
                 smp_chart.append(None)
                 bep_vals.append(None)
 
@@ -416,9 +429,12 @@ if data_loaded and _has_real_smp:
     st.plotly_chart(fig_main, use_container_width=True)
 
     # ── 종합 테이블 생성 함수 ────────────────────────────
-    def _build_summary_table(hours: list[int], is_next_day_hours: bool = False):
+    def _build_summary_table(hours: list[int], use_next_smp: bool = False):
         """시간을 열, 항목을 행으로 하는 종합 테이블 생성.
-        is_next_day_hours: True면 D+1일 시간대 → D+1 SMP 없으면 공란."""
+
+        야간(22~07시): D일 SMP 기준으로 판단 (오늘 공시 SMP)
+        주간(08~21시): use_next_smp=True → D+1 SMP가 있으면 사용, 없으면 공란
+        """
         guidance_local = generate_full_guidance(
             target_date=target_date, hourly_df=hourly_df,
             smp_series=smp_series, thresholds=thresholds,
@@ -434,13 +450,8 @@ if data_loaded and _has_real_smp:
                 "대체단가(원/kWh)": [], "LNG발전 BEP($/MMBtu)": [], "경제성(억원)": []}
 
         for h in hours:
-            # D일 22~23시는 항상 실데이터, D+1 시간대는 _has_next_smp 확인
-            is_d1_hour = (h < 22)  # 0~21시는 D+1일
-            data_available = True
-            if is_d1_hour and is_next_day_hours and not _has_next_smp:
-                data_available = False
-
-            if not data_available:
+            # 주간 테이블에서 D+1 SMP 필요한데 없으면 공란
+            if use_next_smp and not _has_next_smp:
                 rows["최적운전모드"].append("-")
                 rows["SMP(원/kWh)"].append("-")
                 rows["수전단가(원/kWh)"].append("-")
@@ -482,7 +493,7 @@ if data_loaded and _has_real_smp:
         f"{next_date.month}월{next_date.day}일 08시</h3>",
         unsafe_allow_html=True,
     )
-    night_table = _build_summary_table(NIGHT_HOURS, is_next_day_hours=True)
+    night_table = _build_summary_table(NIGHT_HOURS, use_next_smp=False)
 
     # 모드 행에 색상 적용
     def _style_summary(df):
@@ -511,7 +522,7 @@ if data_loaded and _has_real_smp:
         f"<h3 style='text-align:center'>주간 {next_date.month}월{next_date.day}일({next_weekday}) 08시 ~ 22시</h3>",
         unsafe_allow_html=True,
     )
-    day_table = _build_summary_table(DAY_HOURS, is_next_day_hours=True)
+    day_table = _build_summary_table(DAY_HOURS, use_next_smp=True)
     st.dataframe(
         day_table.style.apply(_style_summary, axis=None),
         use_container_width=True, height=280,
