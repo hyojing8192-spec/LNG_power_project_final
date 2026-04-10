@@ -189,9 +189,11 @@ else:
 # ──────────────────────────────────────────────────────────────
 st.sidebar.header("📋 설정")
 
-# 영업일만 선택 가능한 날짜 목록 생성 (오늘 기준 ±60일)
+# 달력 날짜 선택 + 주말/공휴일 자동 보정
 from config import LEGAL_HOLIDAYS
 from datetime import timedelta as _timedelta
+
+_weekday_kr_map = ["월","화","수","목","금","토","일"]
 
 def _is_holiday_check(d):
     """주말 또는 공휴일 여부."""
@@ -199,40 +201,32 @@ def _is_holiday_check(d):
         return True
     return d.weekday() >= 5
 
+def _prev_workday(d):
+    """직전 영업일."""
+    d = d - _timedelta(days=1)
+    while _is_holiday_check(d):
+        d = d - _timedelta(days=1)
+    return d
+
 _today = date.today()
-# 오늘이 주말/공휴일이면 직전 영업일을 기본값으로
-_default_date = _today
-while _is_holiday_check(_default_date):
-    _default_date = _default_date - _timedelta(days=1)
+_default_date = _today if not _is_holiday_check(_today) else _prev_workday(_today)
 
-# 영업일 목록 생성
-_workdays = []
-for i in range(-60, 61):
-    d = _today + _timedelta(days=i)
-    if not _is_holiday_check(d):
-        _workdays.append(d)
+_picked_date = st.sidebar.date_input("분석 기준일", value=_default_date)
 
-_weekday_kr_map = ["월","화","수","목","금","토","일"]
-_workday_labels = {d: f"{d.month}/{d.day}({_weekday_kr_map[d.weekday()]})" for d in _workdays}
+# 주말/공휴일 선택 시 직전 영업일로 자동 보정
+if _is_holiday_check(_picked_date):
+    _corrected = _prev_workday(_picked_date)
+    st.sidebar.warning(
+        f"{_picked_date.month}/{_picked_date.day}({_weekday_kr_map[_picked_date.weekday()]})은 "
+        f"휴일입니다. 직전 영업일 "
+        f"{_corrected.month}/{_corrected.day}({_weekday_kr_map[_corrected.weekday()]})로 표시합니다."
+    )
+    target_date = _corrected
+else:
+    target_date = _picked_date
 
-# 기본 인덱스
-_default_idx = 0
-for i, d in enumerate(_workdays):
-    if d == _default_date:
-        _default_idx = i
-        break
-
-selected_date = st.sidebar.selectbox(
-    "분석 기준일 (영업일)",
-    options=_workdays,
-    index=_default_idx,
-    format_func=lambda d: _workday_labels[d],
-)
-target_date = selected_date
-
-# 대상 날짜 계산 (get_target_dates 로직)
+# 대상 날짜 계산: 당일 + 다음날 + 연속 휴일이면 다음 영업일까지
 def _get_display_dates(base_date):
-    """기준일에 따른 표시 대상 날짜 목록. 당일 + 연속 휴일 + 다음 영업일."""
     dates = [base_date]
     next_d = base_date + _timedelta(days=1)
     dates.append(next_d)
@@ -451,55 +445,42 @@ if data_loaded and _has_real_smp:
             f"스케줄러가 SMP를 수집하면 자동으로 갱신됩니다."
         )
 
-    # ── D+1 SMP 존재 여부 확인 ─────────────────────────────
-    _next_smp = None
-    _next_cached = load_cached_smp(next_date)
-    if _next_cached and len(_next_cached.get("smp", [])) == 24:
-        _nv = _next_cached["smp"]
-        if any(isinstance(v, (int, float)) and not _math.isnan(v) and v > 0 for v in _nv):
-            _next_smp = _nv
-    if _next_smp is None:
-        try:
-            from smp_collector import _scan_epower_excel
-            _nv = _scan_epower_excel(next_date)
-            if _nv and len(_nv) == 24:
-                _next_smp = _nv
-        except Exception:
-            pass
-    _has_next_smp = _next_smp is not None
-
-    # ── 종합 차트: SMP vs BEP vs LNG가격 (22시~다음날 22시) ──
+    # ── 종합 차트: 전체 대상 날짜 시계열 (D일 22시 ~ 마지막 날 21시) ──
     from plotly.subplots import make_subplots
 
-    # 시계열: D일 22시~D+1일 21시 (야간+주간 = 24시간)
-    CHART_HOURS = list(range(22, 24)) + list(range(0, 22))
-    m1, d1 = target_date.month, target_date.day
-    m2, d2 = next_date.month, next_date.day
+    # 날짜쌍 목록
+    _date_pairs = []
+    for i in range(len(_display_dates) - 1):
+        _date_pairs.append((_display_dates[i], _display_dates[i + 1]))
+
+    # 전체 시계열 구성: 첫날 22~23시, 그 이후 각 날짜 00~21시, 마지막 전날 22~23시, 마지막날 00~21시
     x_labels = []
     smp_chart = []
     bep_vals = []
-    best_mode_col = hourly_df["최적모드"]
 
-    for h in CHART_HOURS:
-        if h >= 22:
-            # D일 22~23시: 실데이터
-            x_labels.append(f"{m1}/{d1} {h:02d}시")
-            smp_chart.append(smp_series[h])
-            mode = best_mode_col.iloc[h]
-            if mode == "1기":
-                bep_vals.append(hourly_df["BEP_1기($/MMBtu)"].iloc[h])
-            elif mode == "2기저부하":
-                bep_vals.append(hourly_df["BEP_2기저부하($/MMBtu)"].iloc[h])
-            elif mode == "2기":
-                bep_vals.append(hourly_df["BEP_2기($/MMBtu)"].iloc[h])
-            else:
-                bep_vals.append(0)
-        else:
-            # D+1일 00~21시: D+1 SMP가 있어야 표시 (일자별 데이터)
-            x_labels.append(f"{m2}/{d2} {h:02d}시")
-            if _has_next_smp:
-                smp_chart.append(_next_smp[h])
-                mode = best_mode_col.iloc[h]
+    for pair_idx, (_d_from, _d_to) in enumerate(_date_pairs):
+        _smp_from, _, _ok_from = _all_smp[_d_from]
+        _smp_to, _, _ok_to = _all_smp[_d_to]
+
+        # D일 22~23시 (첫 페어 또는 이전 페어의 주간 다음)
+        if pair_idx == 0 or _d_from != _date_pairs[pair_idx - 1][1]:
+            for h in [22, 23]:
+                x_labels.append(f"{_d_from.month}/{_d_from.day} {h:02d}시")
+                if _ok_from:
+                    smp_chart.append(_smp_from[h])
+                    bep_vals.append(hourly_df[f"BEP_{hourly_df['최적모드'].iloc[h].replace('기저부하','기저부하')}($/MMBtu)"].iloc[h]
+                                    if hourly_df['최적모드'].iloc[h] != "정지" else 0)
+                else:
+                    smp_chart.append(None)
+                    bep_vals.append(None)
+
+        # D+1일 00~21시
+        for h in range(0, 22):
+            x_labels.append(f"{_d_to.month}/{_d_to.day} {h:02d}시")
+            if _ok_to:
+                smp_chart.append(_smp_to[h])
+                # BEP는 D일 모델 기준
+                mode = hourly_df['최적모드'].iloc[h]
                 if mode == "1기":
                     bep_vals.append(hourly_df["BEP_1기($/MMBtu)"].iloc[h])
                 elif mode == "2기저부하":
@@ -512,40 +493,44 @@ if data_loaded and _has_real_smp:
                 smp_chart.append(None)
                 bep_vals.append(None)
 
+    _chart_len = len(x_labels)
+    _chart_height = max(450, min(600, 350 + _chart_len * 2))
+
     fig_main = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # BEP 막대 (먼저 추가 → 뒤에 깔림)
     fig_main.add_trace(
         go.Bar(x=x_labels, y=bep_vals, name="LNG발전 BEP ($/MMBtu)",
                marker_color="#B4C7E7", opacity=0.85,
                text=[f"{b:.1f}" if b is not None else "" for b in bep_vals],
                textposition="outside",
-               textfont=dict(size=12, color="black", family="Arial Black")),
+               textfont=dict(size=11 if _chart_len <= 30 else 8, color="black", family="Arial Black")),
         secondary_y=True,
     )
-
-    # SMP 꺾은선 (나중에 추가 → 막대 위에 표시)
     fig_main.add_trace(
         go.Scatter(x=x_labels, y=smp_chart, mode="lines+markers",
                    name="SMP (원/kWh)", line=dict(color="#2F5597", width=3),
-                   marker=dict(size=6), connectgaps=False),
+                   marker=dict(size=5), connectgaps=False),
         secondary_y=False,
     )
-
-    # LNG가격 점선
     fig_main.add_trace(
-        go.Scatter(x=x_labels, y=[lng_price]*len(CHART_HOURS), mode="lines",
+        go.Scatter(x=x_labels, y=[lng_price]*_chart_len, mode="lines",
                    name=f"LNG가격 {lng_price} $/MMBtu",
                    line=dict(color="#ED7D31", width=2.5, dash="dash")),
         secondary_y=True,
     )
 
+    # 날짜 경계선 추가
+    for _d in _display_dates[1:]:
+        _boundary = f"{_d.month}/{_d.day} 00시"
+        if _boundary in x_labels:
+            fig_main.add_vline(x=_boundary, line_dash="dot", line_color="#ccc", opacity=0.7)
+
     fig_main.update_layout(
         title=dict(text="SMP vs LNG발전 BEP vs LNG가격", x=0.5, xanchor="center"),
-        height=450, plot_bgcolor="white", paper_bgcolor="white",
+        height=_chart_height, plot_bgcolor="white", paper_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-        margin=dict(t=80, b=80), bargap=0.3,
-        xaxis=dict(tickangle=-45),
+        margin=dict(t=80, b=100), bargap=0.25,
+        xaxis=dict(tickangle=-45, dtick=2 if _chart_len > 48 else 1),
     )
     fig_main.update_xaxes(showgrid=True, gridcolor="#E0E0E0")
     fig_main.update_yaxes(title_text="SMP (원/kWh)", secondary_y=False,
