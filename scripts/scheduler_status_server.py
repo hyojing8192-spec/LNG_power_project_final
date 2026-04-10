@@ -14,13 +14,11 @@ def check_status() -> str:
     """running | fetching | stopped"""
     try:
         r = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "Get-Process python -ErrorAction SilentlyContinue | "
-             "Where-Object {$_.CommandLine -like '*run_scheduler*'} | "
-             "Measure-Object | Select-Object -ExpandProperty Count"],
+            ["wmic", "process", "where", "name='python.exe'",
+             "get", "CommandLine"],
             capture_output=True, text=True, timeout=5,
         )
-        if int(r.stdout.strip() or "0") == 0:
+        if "run_scheduler" not in r.stdout:
             return "stopped"
     except Exception:
         return "stopped"

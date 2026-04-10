@@ -72,18 +72,23 @@ import subprocess as _sp
 
 def _check_scheduler_status():
     """running | fetching | stopped"""
+    import platform
+    if platform.system() != "Windows":
+        return "stopped"  # Streamlit Cloud(Linux)에서는 로컬 스케줄러 감지 불가
+
+    # wmic으로 스케줄러 프로세스 확인 (PowerShell보다 안정적)
     try:
         r = _sp.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "Get-Process python -ErrorAction SilentlyContinue | "
-             "Where-Object {$_.CommandLine -like '*run_scheduler*'} | "
-             "Measure-Object | Select-Object -ExpandProperty Count"],
+            ["wmic", "process", "where", "name='python.exe'",
+             "get", "CommandLine"],
             capture_output=True, text=True, timeout=5,
         )
-        if int(r.stdout.strip() or "0") == 0:
+        if "run_scheduler" not in r.stdout:
             return "stopped"
     except Exception:
         return "stopped"
+
+    # KMOS(XPlatform) 실행 중이면 데이터 수집 중
     try:
         r = _sp.run(
             ["tasklist", "/FI", "IMAGENAME eq XPlatform.exe"],
