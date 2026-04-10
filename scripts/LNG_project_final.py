@@ -227,24 +227,20 @@ if smp_series is None:
     except Exception:
         pass
 
-# 2순위: 학습 데이터에서 해당 날짜
+# 2순위: 학습 데이터에서 해당 날짜 (정확히 일치하는 날짜만)
 if smp_series is None and data_loaded and "smp" in raw_df.columns and "datetime" in raw_df.columns:
     df_day = raw_df[raw_df["datetime"].dt.date == target_date]
     if len(df_day) >= 24:
         smp_series = df_day["smp"].head(24).tolist()
         smp_source = "학습 데이터"
-    else:
-        smp_series = raw_df["smp"].head(24).tolist()
-        if len(smp_series) < 24:
-            smp_series = smp_series + [0.0] * (24 - len(smp_series))
-        smp_source = "학습 데이터 (첫날)"
+    # 해당 날짜 데이터가 없으면 폴백하지 않음 (다른 날짜 데이터를 넣지 않음)
 
-# SMP 실데이터 존재 여부 플래그
+# SMP 실데이터 존재 여부 플래그 (캐시/엑셀/학습데이터에서 가져온 경우만 True)
 _has_real_smp = smp_series is not None
 
 if smp_series is None:
-    smp_series = [80.0] * 24
-    smp_source = "기본값 (SMP 미공시)"
+    smp_series = [float('nan')] * 24
+    smp_source = "SMP 미공시 (산출불가)"
 
 # 수집 가능 날짜 표시
 cached_dates = list_cached_dates()
@@ -264,7 +260,7 @@ else:
 # 종합화면 (메인)
 # ══════════════════════════════════════════════════════════════
 
-if data_loaded:
+if data_loaded and _has_real_smp:
     # ML 예측
     pred_results = predict_day(
         models, target_date, smp_series,
@@ -486,6 +482,21 @@ if data_loaded:
 
     st.markdown("---")
 
+elif data_loaded and not _has_real_smp:
+    # SMP 미공시 → 산출불가 표시
+    from datetime import timedelta as _td
+    weekday_kr = ["월","화","수","목","금","토","일"][target_date.weekday()]
+    st.markdown(
+        f"<h2 style='text-align:center;margin-bottom:0'>LNG발전 가동 경제성 판단 결과</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
+    st.error(
+        f"**{target_date.month}월{target_date.day}일({weekday_kr}) — 산출불가**\n\n"
+        f"해당 날짜의 SMP 데이터가 아직 공시되지 않아 경제성 판단을 수행할 수 없습니다.\n\n"
+        f"SMP 소스: **{smp_source}**\n\n"
+        f"스케줄러가 SMP를 수집하면 자동으로 갱신됩니다."
+    )
 else:
     st.warning("데이터를 로드하지 못했습니다. 데이터.csv 파일을 확인하세요.")
 
@@ -494,7 +505,7 @@ else:
 # 상세 분석 (Expander로 접기)
 # ══════════════════════════════════════════════════════════════
 
-if data_loaded:
+if data_loaded and _has_real_smp:
     # ── 경제성 분석 ──────────────────────────────────────
     with st.expander("📈 경제성 분석 (상세)", expanded=False):
         st.subheader(f"24시간 경제성 분석 — {target_date}")
@@ -708,7 +719,7 @@ def _build_period_summary(hours, plan_data, smp_list):
     return lines
 
 
-if data_loaded:
+if data_loaded and _has_real_smp:
   with st.expander("📋 가동 가이던스 (상세)", expanded=False):
     st.subheader(f"가동 가이던스 - {target_date}")
 
@@ -939,7 +950,7 @@ if data_loaded:
 # ══════════════════════════════════════════════════════════════
 # 이상구간 탐지 (Expander)
 # ══════════════════════════════════════════════════════════════
-if data_loaded:
+if data_loaded and _has_real_smp:
   with st.expander("🔍 이상구간 탐지", expanded=False):
     st.subheader("SMP 이상구간 탐지")
 
