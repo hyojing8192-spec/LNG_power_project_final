@@ -390,6 +390,17 @@ def generate_alert_messages(
 # 통합 가이던스 생성
 # ──────────────────────────────────────────────────────────────
 
+def _has_valid_smp(smp_series: list[float]) -> bool:
+    """SMP 리스트에 유효한 실데이터가 있는지 확인."""
+    import math
+    if not smp_series:
+        return False
+    return any(
+        isinstance(v, (int, float)) and not math.isnan(v) and v > 0 and v != 80.0
+        for v in smp_series
+    )
+
+
 def generate_full_guidance(
     target_date: date,
     hourly_df: pd.DataFrame,
@@ -403,13 +414,58 @@ def generate_full_guidance(
     """
     F5.1~F5.3 통합 가이던스 생성.
 
+    SMP 실데이터가 없는 날짜는 가동판단을 수행하지 않고
+    "SMP 미공시" 상태를 반환한다.
+
     Returns:
         dict:
             hourly_plan     : F5.1 시간별 가동계획표 (list[dict])
             daily_summary   : F5.2 일간 요약 리포트 (dict)
             alerts          : F5.3 이상구간 경고 메시지 (list[dict])
             text_report     : 전체 텍스트 리포트 (str)
+            smp_available   : SMP 실데이터 존재 여부 (bool)
     """
+    # SMP 실데이터 없으면 빈 가이던스 반환
+    if not _has_valid_smp(smp_series):
+        weekday_kr = ["월","화","수","목","금","토","일"][target_date.weekday()]
+        empty_plan = [
+            {
+                "hour": h, "time_str": f"{h:02d}:00", "smp": None,
+                "best_mode": "-", "action": "판단불가", "bep": None,
+                "econ_bil": None, "note": "SMP 미공시",
+            }
+            for h in range(24)
+        ]
+        empty_summary = {
+            "weekday": weekday_kr,
+            "lng_price": lng_price,
+            "exchange_rate": exchange_rate,
+            "lng_heat": lng_heat,
+            "price_type": "Spot" if is_spot else "사용단가",
+            "smp_avg": 0, "smp_max": 0, "smp_min": 0,
+            "best_overall": "-",
+            "total_econ_best": 0,
+            "mode_dist": {},
+            "anomaly_hours": {},
+            "econ_totals": {},
+            "recommendation": f"[참고] {target_date} SMP 미공시 — 데이터 수집 후 자동 갱신됩니다.",
+        }
+        text = (
+            f"{'='*70}\n"
+            f"  {target_date} ({weekday_kr}) — SMP 미공시\n"
+            f"  SMP 데이터가 없어 가동판단을 수행할 수 없습니다.\n"
+            f"  스케줄러가 SMP를 수집하면 자동으로 가이던스가 생성됩니다.\n"
+            f"{'='*70}"
+        )
+        return {
+            "hourly_plan": empty_plan,
+            "daily_summary": empty_summary,
+            "alerts": [],
+            "text_report": text,
+            "kakao_message": f"{target_date} SMP 미공시 — 가동판단 불가",
+            "smp_available": False,
+        }
+
     hourly_plan = generate_hourly_plan(hourly_df, smp_series, thresholds, lng_price)
     daily_summary = generate_daily_summary(
         target_date, hourly_df, smp_series, thresholds,
@@ -428,6 +484,7 @@ def generate_full_guidance(
         "alerts": alerts,
         "text_report": text_report,
         "kakao_message": kakao_message,
+        "smp_available": True,
     }
 
 
