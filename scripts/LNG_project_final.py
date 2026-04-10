@@ -285,30 +285,113 @@ if data_loaded and _has_real_smp:
         smp_high_threshold=thresholds["smp_high"],
     )
 
-    # ── 종합화면: 제목 + 조건 ──────────────────────────────
+    # ── 카드 UI CSS ──────────────────────────────────────
+    st.markdown("""
+    <style>
+    .card {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+        padding: 20px 24px;
+        margin-bottom: 16px;
+    }
+    .card-header {
+        font-size: 1.1em;
+        font-weight: 700;
+        color: #2F5597;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 2px solid #B4C7E7;
+    }
+    .card-metric {
+        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+        border-radius: 10px;
+        padding: 16px;
+        text-align: center;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .card-metric .value {
+        font-size: 1.5em;
+        font-weight: 800;
+        color: #2F5597;
+    }
+    .card-metric .label {
+        font-size: 0.8em;
+        color: #666;
+        margin-top: 4px;
+    }
+    .title-card {
+        background: linear-gradient(135deg, #2F5597, #4472C4);
+        color: white;
+        border-radius: 12px;
+        padding: 24px;
+        text-align: center;
+        margin-bottom: 16px;
+        box-shadow: 0 4px 16px rgba(47,85,151,0.3);
+    }
+    .title-card h2 { margin: 0; font-size: 1.6em; }
+    .title-card p { margin: 8px 0 0 0; opacity: 0.9; font-size: 0.95em; }
+    .section-title {
+        font-size: 1.15em;
+        font-weight: 700;
+        color: #333;
+        margin: 20px 0 10px 0;
+        padding: 10px 16px;
+        background: #f0f2f6;
+        border-radius: 8px;
+        border-left: 4px solid #2F5597;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── 종합화면: 제목 카드 ──────────────────────────────
     from datetime import timedelta as _td
     weekday_kr = ["월","화","수","목","금","토","일"][target_date.weekday()]
     next_date = target_date + _td(days=1)
     price_type = "Spot" if is_spot else "사용단가"
+    avg_elec = hourly_df['수전단가(원/kWh)'].mean()
 
     st.markdown(
-        f"<h2 style='text-align:center;margin-bottom:0'>LNG발전 가동 경제성 판단 결과</h2>",
+        f"""<div class="title-card">
+            <h2>LNG발전 가동 경제성 판단 결과</h2>
+            <p>{target_date.month}월 {target_date.day}일({weekday_kr}) 기준</p>
+        </div>""",
         unsafe_allow_html=True,
     )
-    st.markdown(
-        f"<p style='text-align:center;color:#555;font-size:1.05em'>"
-        f"※ LNG 가격 : <b>{lng_price}</b>$/MMBtu, "
-        f"환율 : <b>{exchange_rate:,.0f}</b>원/$, "
-        f"수전단가 : <b>{hourly_df['수전단가(원/kWh)'].mean():.1f}</b>원/kWh (평균)"
-        f"</p>",
-        unsafe_allow_html=True,
-    )
+
+    # ── 핵심 지표 카드 ───────────────────────────────────
+    avg_smp_val = np.mean(smp_series)
+    best_modes = hourly_df["최적모드"].value_counts()
+    top_mode = best_modes.index[0] if len(best_modes) > 0 else "-"
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        st.markdown(f"""<div class="card-metric">
+            <div class="value">{lng_price} $/MMBtu</div>
+            <div class="label">LNG 가격 ({price_type})</div>
+        </div>""", unsafe_allow_html=True)
+    with mc2:
+        st.markdown(f"""<div class="card-metric">
+            <div class="value">{exchange_rate:,.0f} 원/$</div>
+            <div class="label">환율</div>
+        </div>""", unsafe_allow_html=True)
+    with mc3:
+        st.markdown(f"""<div class="card-metric">
+            <div class="value">{avg_smp_val:.1f} 원/kWh</div>
+            <div class="label">평균 SMP</div>
+        </div>""", unsafe_allow_html=True)
+    with mc4:
+        st.markdown(f"""<div class="card-metric">
+            <div class="value">{top_mode}</div>
+            <div class="label">최적 운전모드</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     # SMP 실데이터 없으면 경고
     if not _has_real_smp:
         st.warning(
             f"**{target_date} SMP 실데이터가 없습니다.** "
-            f"현재 기본값(80원/kWh)으로 표시 중이며, 실제 가동판단에 활용할 수 없습니다. "
             f"스케줄러가 SMP를 수집하면 자동으로 갱신됩니다."
         )
 
@@ -412,7 +495,10 @@ if data_loaded and _has_real_smp:
     fig_main.update_yaxes(title_text="SMP (원/kWh)", secondary_y=False,
                           showgrid=True, gridcolor="#E0E0E0")
     fig_main.update_yaxes(title_text="BEP / LNG가격 ($/MMBtu)", secondary_y=True)
+
+    st.markdown('<div class="card"><div class="card-header">SMP vs LNG발전 BEP vs LNG가격</div>', unsafe_allow_html=True)
     st.plotly_chart(fig_main, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # ── 종합 테이블 생성 함수 ────────────────────────────
     def _build_summary_table(hours: list[int], mixed_dates: bool = False):
@@ -485,9 +571,10 @@ if data_loaded and _has_real_smp:
     NIGHT_HOURS = list(range(22, 24)) + list(range(0, 8))
     DAY_HOURS = list(range(8, 22))
 
+    next_weekday_kr = ["월","화","수","목","금","토","일"][next_date.weekday()]
     st.markdown(
-        f"<h3 style='text-align:center'>야간 {target_date.month}월{target_date.day}일({weekday_kr}) 22시 ~ "
-        f"{next_date.month}월{next_date.day}일 08시</h3>",
+        f'<div class="section-title">야간 {target_date.month}월{target_date.day}일({weekday_kr}) 22시 ~ '
+        f'{next_date.month}월{next_date.day}일({next_weekday_kr}) 08시</div>',
         unsafe_allow_html=True,
     )
     night_table = _build_summary_table(NIGHT_HOURS, mixed_dates=True)
@@ -514,9 +601,8 @@ if data_loaded and _has_real_smp:
     )
 
     # ── 주간 테이블 (D+1일 08시 ~ 21시) ─────────────────
-    next_weekday = ["월","화","수","목","금","토","일"][next_date.weekday()]
     st.markdown(
-        f"<h3 style='text-align:center'>주간 {next_date.month}월{next_date.day}일({next_weekday}) 08시 ~ 22시</h3>",
+        f'<div class="section-title">주간 {next_date.month}월{next_date.day}일({next_weekday_kr}) 08시 ~ 22시</div>',
         unsafe_allow_html=True,
     )
     day_table = _build_summary_table(DAY_HOURS, mixed_dates=False)
@@ -531,16 +617,30 @@ elif data_loaded and not _has_real_smp:
     # SMP 미공시 → 산출불가 표시
     from datetime import timedelta as _td
     weekday_kr = ["월","화","수","목","금","토","일"][target_date.weekday()]
+    st.markdown("""
+    <style>
+    .unavail-card {
+        background: linear-gradient(135deg, #fff5f5, #ffe3e3);
+        border: 2px solid #dc3545;
+        border-radius: 12px;
+        padding: 40px;
+        text-align: center;
+        margin: 20px 0;
+    }
+    .unavail-card h2 { color: #dc3545; margin-bottom: 12px; }
+    .unavail-card p { color: #666; font-size: 1.05em; }
+    </style>
+    """, unsafe_allow_html=True)
     st.markdown(
-        f"<h2 style='text-align:center;margin-bottom:0'>LNG발전 가동 경제성 판단 결과</h2>",
+        f"""<div class="unavail-card">
+            <h2>{target_date.month}월{target_date.day}일({weekday_kr}) — 산출불가</h2>
+            <p>해당 날짜의 SMP 데이터가 아직 공시되지 않아<br>경제성 판단을 수행할 수 없습니다.</p>
+            <p style="margin-top:16px;color:#999;font-size:0.9em">
+                SMP 소스: {smp_source}<br>
+                스케줄러가 SMP를 수집하면 자동으로 갱신됩니다.
+            </p>
+        </div>""",
         unsafe_allow_html=True,
-    )
-    st.markdown("---")
-    st.error(
-        f"**{target_date.month}월{target_date.day}일({weekday_kr}) — 산출불가**\n\n"
-        f"해당 날짜의 SMP 데이터가 아직 공시되지 않아 경제성 판단을 수행할 수 없습니다.\n\n"
-        f"SMP 소스: **{smp_source}**\n\n"
-        f"스케줄러가 SMP를 수집하면 자동으로 갱신됩니다."
     )
 else:
     st.warning("데이터를 로드하지 못했습니다. 데이터.csv 파일을 확인하세요.")
