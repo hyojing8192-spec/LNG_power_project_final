@@ -1,5 +1,5 @@
 """
-LNG 발전소 경제성 자동판단 시스템 — Streamlit 대시보드
+LNG발전 최적 가이던스 제공 프로그램 — Streamlit 대시보드
 """
 
 from __future__ import annotations
@@ -39,12 +39,12 @@ from guidance_generator import generate_full_guidance
 # 페이지 설정
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="LNG 발전 경제성 자동판단",
+    page_title="LNG발전 최적 가이던스",
     page_icon="⚡",
     layout="wide",
 )
 
-st.title("⚡ LNG 발전소 경제성 자동판단 시스템")
+st.title("⚡ LNG발전 최적 가이던스 제공 프로그램")
 st.caption("SMP 기반 운전모드 최적화 · ML 예측 · 이상구간 탐지")
 
 # 자동 새로고침 (5분 간격) — 스케줄러가 새 데이터 저장 시 반영
@@ -296,7 +296,7 @@ if data_loaded:
     price_type = "Spot" if is_spot else "사용단가"
 
     st.markdown(
-        f"<h2 style='text-align:center;margin-bottom:0'>LNG발전 가동 경제성판단</h2>",
+        f"<h2 style='text-align:center;margin-bottom:0'>LNG발전 가동 경제성 판단 결과</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -1116,4 +1116,4 @@ if data_loaded:
 
 # ── 푸터 ──────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("LNG 발전소 경제성 자동판단 시스템 v1.0 | XGBoost 기반 ML 예측 + 동적 임계값 이상탐지")
+st.caption("LNG발전 최적 가이던스 제공 프로그램 v1.0 | XGBoost 기반 ML 예측 + 동적 임계값 이상탐지")
