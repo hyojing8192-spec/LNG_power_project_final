@@ -12,6 +12,10 @@ import threading
 
 def check_status() -> str:
     """running | fetching | stopped"""
+    import platform
+    if platform.system() != "Windows":
+        return "stopped"
+
     try:
         r = subprocess.run(
             ["wmic", "process", "where", "name='python.exe'",
