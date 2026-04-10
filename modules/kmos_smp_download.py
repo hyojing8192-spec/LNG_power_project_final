@@ -375,6 +375,14 @@ def download_smp_from_kmos(
     if not found:
         print(f"  [!] 파일을 찾지 못했습니다. 수동 확인 필요.")
 
+    # 저장된 엑셀의 SMP 데이터 유효성 검증
+    if found and os.path.exists(save_path):
+        tomorrow = (datetime.now() + timedelta(days=1))
+        check_date = date(tomorrow.year, tomorrow.month, tomorrow.day)
+        if not _has_valid_smp_data(check_date):
+            print(f"  [!] 엑셀 저장됐으나 SMP 데이터 없음 (미공시) → 삭제")
+            os.remove(save_path)
+
     # ── Step 8: KMOS 종료 ──
     print(f"[{now()}] Step 8: KMOS 종료...")
     subprocess.run(["taskkill", "/IM", "XPlatform.exe", "/F"], capture_output=True)
@@ -539,6 +547,13 @@ def download_multi_dates(
 
         if not found:
             print(f"  [!] 파일 저장 실패")
+
+        # 저장된 엑셀의 SMP 데이터 유효성 검증
+        if found and os.path.exists(save_path):
+            if not _has_valid_smp_data(target_d):
+                print(f"  [!] 엑셀 저장됐으나 SMP 데이터 없음 (미공시) → 삭제")
+                os.remove(save_path)
+                found = False
 
         results.append({"date": target_d, "file": save_path, "success": found})
 

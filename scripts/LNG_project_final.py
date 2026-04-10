@@ -47,6 +47,14 @@ st.set_page_config(
 st.title("⚡ LNG 발전소 경제성 자동판단 시스템")
 st.caption("SMP 기반 운전모드 최적화 · ML 예측 · 이상구간 탐지")
 
+# 자동 새로고침 (5분 간격) — 스케줄러가 새 데이터 저장 시 반영
+st_autorefresh = None
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=300_000, limit=None, key="data_refresh")
+except ImportError:
+    pass  # streamlit-autorefresh 미설치 시 수동 새로고침만 지원
+
 # ──────────────────────────────────────────────────────────────
 # 데이터 로드 및 ML 모델 준비 (사이드바보다 먼저 — 열량·환율 추출용)
 # ──────────────────────────────────────────────────────────────
@@ -100,15 +108,33 @@ st.sidebar.markdown("---")
 st.sidebar.caption(f"LNG 열량: **{lng_heat}** Mcal/Nm³ (학습데이터 평균)")
 st.sidebar.caption(f"환율: **{exchange_rate:,.2f}** 원/$ (전일 평균)")
 
-# SMP 추출: 수집 캐시 우선 → 학습 데이터 폴백
+# SMP 추출: 수집 캐시 우선 → ePower 엑셀 → 학습 데이터 폴백
+import math as _math
 smp_series = None
 smp_source = ""
 
 # 1순위: smp_collector가 수집한 캐시 (data/smp_cache/)
 cached = load_cached_smp(target_date)
 if cached and len(cached.get("smp", [])) == 24:
-    smp_series = cached["smp"]
-    smp_source = f"수집 캐시 ({cached.get('source', '')})"
+    _smp_vals = cached["smp"]
+    _has_valid = any(
+        isinstance(v, (int, float)) and not _math.isnan(v) and v > 0
+        for v in _smp_vals
+    )
+    if _has_valid:
+        smp_series = _smp_vals
+        smp_source = f"수집 캐시 ({cached.get('source', '')})"
+
+# 1-2순위: ePower 엑셀에서 직접 읽기 (캐시에 없을 때)
+if smp_series is None:
+    try:
+        from smp_collector import _scan_epower_excel
+        _excel_smp = _scan_epower_excel(target_date)
+        if _excel_smp and len(_excel_smp) == 24:
+            smp_series = _excel_smp
+            smp_source = "ePower 엑셀"
+    except Exception:
+        pass
 
 # 2순위: 학습 데이터에서 해당 날짜
 if smp_series is None and data_loaded and "smp" in raw_df.columns and "datetime" in raw_df.columns:
@@ -128,10 +154,17 @@ if smp_series is None:
 
 # 수집 가능 날짜 표시
 cached_dates = list_cached_dates()
+st.sidebar.markdown("---")
 if cached_dates:
-    st.sidebar.markdown("---")
     st.sidebar.caption(f"SMP 수집 완료: {cached_dates[-1]} 까지 ({len(cached_dates)}일)")
 st.sidebar.caption(f"SMP 소스: **{smp_source}**")
+
+# 스케줄러 저장 CSV 존재 여부
+_csv_path = _ROOT / "data" / f"경제성분석_{target_date}.csv"
+if _csv_path.exists():
+    st.sidebar.success(f"경제성분석 CSV 존재 ({target_date})")
+else:
+    st.sidebar.info(f"경제성분석 CSV 미생성 ({target_date}) — 스케줄러 실행 후 자동 생성")
 
 # ──────────────────────────────────────────────────────────────
 # 탭 레이아웃

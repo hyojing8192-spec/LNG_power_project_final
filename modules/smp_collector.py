@@ -523,7 +523,16 @@ def collect_smp(target_date: date | None = None) -> dict:
         f"ePower 마켓에서 엑셀 다운로드 후 data/smp_excel/ 폴더에 넣어주세요"
     )
 
-    # ── 4순위: 전일 캐시 폴백 ─────────────────────────────────
+    # ── 4순위: 전일 캐시 폴백 (당일 이전 데이터만 허용) ──────────
+    # D+1(미래) 날짜는 폴백하지 않음 — 아직 공시 안 된 데이터
+    if target_date > date.today():
+        logger.warning(f"[수집] {date_str} 미래 날짜 → SMP 미공시, 폴백 없이 종료")
+        return {
+            "date": date_str, "smp": [float('nan')] * 24,
+            "source": "not_available", "updated": False,
+            "collected_at": now_str,
+        }
+
     for days_back in range(1, 8):
         prev_date = target_date - timedelta(days=days_back)
         prev_cache = SMP_CACHE_DIR / f"smp_{prev_date.strftime('%Y-%m-%d')}.json"
@@ -724,13 +733,24 @@ def run_scheduled() -> list[dict]:
 # ──────────────────────────────────────────────────────────────
 
 def load_cached_smp(target_date: date | None = None) -> dict | None:
-    """캐시된 SMP 데이터 로드. 없으면 None."""
+    """캐시된 SMP 데이터 로드. 유효한 데이터가 없으면 None."""
+    import math as _math
     if target_date is None:
         target_date = date.today()
     cache_path = SMP_CACHE_DIR / f"smp_{target_date.strftime('%Y-%m-%d')}.json"
     if cache_path.is_file():
         with open(cache_path, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # nan/0만 있는 무효 데이터 필터링
+        smp_vals = data.get("smp", [])
+        has_valid = any(
+            isinstance(v, (int, float)) and not _math.isnan(v) and v > 0
+            for v in smp_vals
+        )
+        if has_valid:
+            return data
+        # 무효 캐시는 반환하지 않음
+        return None
     return None
 
 
