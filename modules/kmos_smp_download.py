@@ -75,20 +75,7 @@ def save_coords(coords: dict):
 COORDS = load_coords()
 
 
-def _is_holiday(d: date) -> bool:
-    """공휴일 또는 주말 여부."""
-    try:
-        from config import LEGAL_HOLIDAYS
-        if d in LEGAL_HOLIDAYS:
-            return True
-    except ImportError:
-        pass
-    return d.weekday() >= 5  # 토(5), 일(6)
-
-
-def _is_workday(d: date) -> bool:
-    """평일(영업일) 여부."""
-    return not _is_holiday(d)
+from date_utils import is_holiday, is_workday
 
 
 def _has_cached_excel(target_date: date) -> bool:
@@ -135,54 +122,15 @@ def _has_valid_smp_data(target_date: date) -> bool:
         return False
 
 
-def get_target_dates(base_date: date | None = None) -> list[date]:
-    """
-    SMP 다운로드 대상 날짜 목록 계산.
-
-    규칙:
-      - 기본: 내일만 다운로드 (1일)
-      - 내일이 휴일(주말/공휴일): 연속 휴일 + 다음 영업일까지
-      - 당일 엑셀이 없으면: 당일도 포함
-
-    이미 엑셀이 저장된 날짜는 건너뜀.
-
-    Args:
-        base_date: 기준일 = 조회하는 날 (None이면 오늘)
-
-    Returns:
-        정렬된 날짜 리스트 (캐시 미존재 날짜만)
-    """
+def get_target_dates(base_date=None):
+    from date_utils import calc_download_dates
     if base_date is None:
         base_date = date.today()
-
-    dates = set()
-
-    # 당일 유효 데이터가 없으면 당일도 포함
-    if not _has_valid_smp_data(base_date):
-        dates.add(base_date)
-
-    # 내일
-    tomorrow = base_date + timedelta(days=1)
-    dates.add(tomorrow)
-
-    # 내일이 휴일이면 연속 휴일 끝난 다음 영업일까지 추가
-    if _is_holiday(tomorrow):
-        d = tomorrow
-        while True:
-            next_d = d + timedelta(days=1)
-            if _is_holiday(next_d):
-                dates.add(next_d)
-                d = next_d
-            else:
-                dates.add(next_d)  # 다음 영업일
-                break
-
-    # 이미 유효한 SMP 데이터가 있는 날짜는 제외
-    dates = {d for d in dates if not _has_valid_smp_data(d)}
-
+    dates = calc_download_dates(base_date)
+    # KMOS-specific: filter out dates that already have valid SMP data
+    dates = [d for d in dates if not _has_valid_smp_data(d)]
     if not dates:
         print("  [INFO] 모든 대상 날짜의 SMP 데이터가 이미 존재합니다.")
-
     return sorted(dates)
 
 
@@ -419,7 +367,7 @@ def download_multi_dates(
     print(f"  기준일: {base_date} ({weekdays_kr[base_date.weekday()]})")
     print(f"  대상 날짜: {len(targets)}일")
     for d in targets:
-        holiday_tag = " [휴일]" if _is_holiday(d) else ""
+        holiday_tag = " [휴일]" if is_holiday(d) else ""
         print(f"    - {d} ({weekdays_kr[d.weekday()]}){holiday_tag}")
     print("=" * 60)
     print()
@@ -462,7 +410,7 @@ def download_multi_dates(
     for i, target_d in enumerate(targets):
         d_str = target_d.strftime('%Y%m%d')
         filename = f"계통한계가격_{d_str}_육지"
-        holiday_tag = " [휴일]" if _is_holiday(target_d) else ""
+        holiday_tag = " [휴일]" if is_holiday(target_d) else ""
 
         print(f"\n{'─'*50}")
         print(f"  [{i+1}/{len(targets)}] {target_d} ({weekdays_kr[target_d.weekday()]}){holiday_tag}")
@@ -603,11 +551,11 @@ def run_scheduled_download(base_date: date | None = None, delay: float = 1.5):
         all_dates.add(base_date)
     tomorrow = base_date + timedelta(days=1)
     all_dates.add(tomorrow)
-    if _is_holiday(tomorrow):
+    if is_holiday(tomorrow):
         d = tomorrow
         while True:
             next_d = d + timedelta(days=1)
-            if _is_holiday(next_d):
+            if is_holiday(next_d):
                 all_dates.add(next_d)
                 d = next_d
             else:
@@ -620,7 +568,7 @@ def run_scheduled_download(base_date: date | None = None, delay: float = 1.5):
     print(f"  기준일: {base_date} ({weekdays_kr[base_date.weekday()]})")
     print(f"  전체 대상: {len(all_dates)}일")
     for d in all_dates:
-        tag = " [휴일]" if _is_holiday(d) else ""
+        tag = " [휴일]" if is_holiday(d) else ""
         print(f"    - {d} ({weekdays_kr[d.weekday()]}){tag}")
     print(f"  스케줄: 17:30, 18:00, 18:30, 19:00, 19:30 (최대 5회)")
     print("=" * 60)
@@ -725,7 +673,7 @@ def _download_specific_dates(dates: list[date], delay: float = 1.5):
 
         d_str = target_d.strftime('%Y%m%d')
         filename = f"계통한계가격_{d_str}_육지"
-        holiday_tag = " [휴일]" if _is_holiday(target_d) else ""
+        holiday_tag = " [휴일]" if is_holiday(target_d) else ""
 
         print(f"\n  [{i+1}/{len(dates_sorted)}] {target_d} ({weekdays_kr[target_d.weekday()]}){holiday_tag}")
 
@@ -901,7 +849,7 @@ if __name__ == "__main__":
         print(f"\n  기준일: {base} ({weekdays_kr[base.weekday()]})")
         print(f"  다운로드 대상: {len(targets)}일")
         for d in targets:
-            tag = " [휴일]" if _is_holiday(d) else ""
+            tag = " [휴일]" if is_holiday(d) else ""
             print(f"    - {d} ({weekdays_kr[d.weekday()]}){tag}")
     elif args.schedule:
         base = None

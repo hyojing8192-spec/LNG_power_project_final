@@ -22,7 +22,7 @@ for p in [str(ROOT), str(_MODULES)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from smp_collector import collect_smp, _get_target_dates
+from smp_collector import collect_smp
 from economics_engine import build_hourly_table, get_elec_price
 from anomaly_detector import calc_smp_thresholds
 from ml_predictor import load_data, load_models, predict_day

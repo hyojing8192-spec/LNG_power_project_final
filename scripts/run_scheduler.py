@@ -1,18 +1,24 @@
 """
 run_scheduler.py  (F7.1 + F7.2)
 ================================
-SMP 수집 > 경제성 분석 > 가이던스 생성 > 메일 발송 통합 스케줄러.
+KMOS SMP 자동 다운로드 > 경제성 분석 > 가이던스 생성 > 메일/카톡 통합 발송 스케줄러.
 
 실행 흐름:
-  17:30  SMP 수집 시도 (KPX 크롤링)
-  17:35  SMP 수집 성공 시 -> 경제성 분석 + 가이던스 + 메일 발송
-         SMP 수집 실패 시 -> 18:00, 18:30, 19:00 재시도
-  19:30  최종 시도 (폴백 데이터 포함)
+  17:30  KMOS(ePower 마켓) SMP 엑셀 자동 다운로드 + SMP 확보 확인
+         SMP 확보 시 -> 경제성 분석 + 가이던스 + 메일/카톡 통합 발송 -> 당일 완료
+         SMP 미확보 시 -> 10분 후 재시도
+  17:40  KMOS 재시도 (이전 성공 시 스킵)
+  ...    10분 간격 반복
+  19:00  최종 시도
+
+대상 날짜:
+  평일(월~목): 내일 1일만 분석 (메일: 오늘 야간~내일 주간)
+  금요일/공휴일 전날: 기준일 + 연속 휴일 통합 분석 (메일/카톡 1건 통합 발송)
 
 사용법:
-  python run_scheduler.py              # 스케줄러 시작 (백그라운드 상주)
+  python run_scheduler.py              # 스케줄러 시작 (17:30~19:00 자동 실행)
   python run_scheduler.py --now        # 즉시 1회 실행 (테스트용)
-  python run_scheduler.py --time 17:30 # 특정 시간에 1회 실행
+  python run_scheduler.py --auto       # 자동 판단 실행 (평일/금요일/공휴일 자동)
 """
 
 from __future__ import annotations
@@ -274,25 +280,8 @@ def run_pipeline_multi(
 
     weekdays_kr = ["월","화","수","목","금","토","일"]
 
-    # 분석 대상 날짜: 기준일 + 연속 휴일까지 (다음 영업일은 마지막 D+1 주간으로 커버)
-    # 기준일 포함해야 기준일 22시~익일 주간이 메일/카톡에 나옴
-    # 예: 금(4/10) → [4/10, 4/11, 4/12] → 4/10 22시~4/13 22시 커버
-    from kmos_smp_download import _is_holiday
-    target_dates = [base_date]
-    tomorrow = base_date + timedelta(days=1)
-    if _is_holiday(tomorrow):
-        target_dates.append(tomorrow)
-        d = tomorrow
-        while True:
-            next_d = d + timedelta(days=1)
-            if _is_holiday(next_d):
-                target_dates.append(next_d)
-                d = next_d
-            else:
-                break
-    else:
-        target_dates.append(tomorrow)
-    target_dates = sorted(set(target_dates))
+    from date_utils import calc_target_dates
+    target_dates = calc_target_dates(base_date, include_base=True)
 
     logger.info(f"===== 다중 날짜 파이프라인 시작: {base_date} ({weekdays_kr[base_date.weekday()]}) =====")
     logger.info(f"  대상 날짜: {len(target_dates)}일 - {[str(d) for d in target_dates]}")
@@ -482,41 +471,96 @@ def run_pipeline_multi(
 # F7.1  APScheduler 스케줄링
 # ──────────────────────────────────────────────────────────────
 
+def _try_kmos_and_collect(target_dates: list) -> bool:
+    """
+    KMOS에서 SMP 엑셀 다운로드 후 수집 시도.
+
+    Returns:
+        True: 모든 대상 날짜의 SMP 실데이터 확보됨
+        False: 일부 또는 전체 미확보
+    """
+    # KMOS 다운로드
+    try:
+        download_multi_dates()
+        logger.info("  KMOS 다운로드 완료")
+    except Exception as e:
+        logger.warning(f"  KMOS 다운로드 실패: {e}")
+
+    # 수집 확인
+    all_ok = True
+    for d in target_dates:
+        result = collect_smp(d)
+        has_real = result.get("updated", False) and not all(
+            (v == 0 or (isinstance(v, float) and math.isnan(v))) for v in result.get("smp", [])
+        )
+        if not has_real:
+            logger.info(f"  {d} SMP 미확보 (source: {result['source']})")
+            all_ok = False
+        else:
+            logger.info(f"  {d} SMP 확보 (source: {result['source']}, 평균 {sum(result['smp'])/24:.1f}원)")
+    return all_ok
+
+
 def start_scheduler():
     """
-    APScheduler로 매일 자동 실행.
-
-    스케줄:
-      17:30  1차 시도
-      18:00  2차 시도 (1차 실패 시)
-      18:30  3차 시도
-      19:00  4차 시도
-      19:30  최종 시도
+    매일 17:30~19:00 사이 10분 간격으로 KMOS SMP 다운로드 시도.
+    SMP 확보되면 즉시 분석+전파 파이프라인 실행 후 당일 완료.
+    확보 못 하면 10분 후 재시도, 19:00까지 반복.
     """
     from apscheduler.schedulers.blocking import BlockingScheduler
 
+    _pipeline_done_date = {"value": None}  # 당일 파이프라인 완료 여부
+
+    def _scheduled_job():
+        now = datetime.now()
+        today = date.today()
+
+        # 17:30 이전 또는 19:00 이후면 스킵
+        now_minutes = now.hour * 60 + now.minute
+        if now_minutes < 17 * 60 + 30 or now_minutes > 19 * 60:
+            return
+
+        # 이미 오늘 파이프라인 완료했으면 스킵
+        if _pipeline_done_date["value"] == today:
+            logger.info(f"  오늘({today}) 이미 파이프라인 완료 -> 스킵")
+            return
+
+        from date_utils import calc_target_dates
+        target_dates = calc_target_dates(today, include_base=True)
+
+        weekdays_kr = ["월","화","수","목","금","토","일"]
+        logger.info(f"===== KMOS 수집 시도: {today} ({weekdays_kr[today.weekday()]}) =====")
+        logger.info(f"  대상: {[str(d) for d in target_dates]}")
+
+        # KMOS 다운로드 + SMP 수집 확인
+        all_ok = _try_kmos_and_collect(target_dates)
+
+        if all_ok:
+            logger.info("  전체 SMP 확보 → 파이프라인 실행")
+            success = run_pipeline_multi(today)
+            if success:
+                _pipeline_done_date["value"] = today
+                logger.info(f"  파이프라인 완료! 다음 스케줄은 내일 17:30")
+        else:
+            logger.info("  SMP 미확보 → 10분 후 재시도")
+
     scheduler = BlockingScheduler()
 
-    run_times = ["17:30", "18:00", "18:30", "19:00", "19:30"]
-
-    for t in run_times:
-        hour, minute = map(int, t.split(":"))
-        scheduler.add_job(
-            run_pipeline_multi,
-            trigger="cron",
-            hour=hour,
-            minute=minute,
-            id=f"pipeline_{t.replace(':','')}",
-            replace_existing=True,
-            misfire_grace_time=300,
-        )
-        logger.info(f"  스케줄 등록: 매일 {t}")
+    # 17:30~19:00 사이 10분 간격 (17:30, 17:40, 17:50, 18:00, ..., 19:00)
+    scheduler.add_job(
+        _scheduled_job,
+        trigger="cron",
+        hour="17-19",
+        minute="0,10,20,30,40,50",
+        id="kmos_pipeline",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    # 17:00~17:20은 제외, 19:10 이후도 제외 → job 내부에서 시간 체크
+    logger.info("  스케줄 등록: 매일 17:30~19:00, 10분 간격")
+    logger.info("  SMP 확보 시 즉시 분석+전파, 이후 당일 스킵")
 
     logger.info("스케줄러 시작. Ctrl+C로 종료.")
-    logger.info("다음 실행 예정:")
-    for job in scheduler.get_jobs():
-        next_time = getattr(job, 'next_run_time', None) or getattr(job, 'next_fire_time', None)
-        logger.info(f"  {job.id}: {next_time}")
 
     try:
         scheduler.start()

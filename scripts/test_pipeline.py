@@ -301,11 +301,11 @@ def _print_summary(results: dict):
     has_fail = any("[FAIL]" in s for s in results.values())
     print(f"{'='*65}")
     if has_fail:
-        print("  [FAIL] 파이프라인 실패 — 위 항목을 확인하세요")
+        print("  [FAIL] 파이프라인 실패 -위 항목을 확인하세요")
     elif all_ok:
         print("  [OK] 전체 파이프라인 정상 완료!")
     else:
-        print("  [WARN] 일부 경고 발생 — 결과를 확인하세요")
+        print("  [WARN] 일부 경고 발생 -결과를 확인하세요")
     print(f"{'='*65}\n")
 
 
@@ -318,7 +318,7 @@ def run_test_auto(base_date: date, lng_price: float, is_spot: bool,
     모든 날짜를 먼저 분석한 뒤, 메일/카톡을 1건으로 통합 발송.
     SMP 실데이터가 없는 날짜는 자동 제외.
     """
-    from kmos_smp_download import _is_holiday
+    from date_utils import calc_target_dates
     from smp_collector import collect_smp
     from economics_engine import build_hourly_table, get_elec_price
     from anomaly_detector import calc_smp_thresholds
@@ -330,24 +330,7 @@ def run_test_auto(base_date: date, lng_price: float, is_spot: bool,
     weekdays = ["월", "화", "수", "목", "금", "토", "일"]
 
     # ── 대상 날짜 계산 ──
-    # 기준일(금요일) 자체를 포함해야 기준일 22시~익일 주간이 커버됨
-    # 기준일 + 연속 휴일까지 (다음 영업일은 마지막 분석의 D+1 주간으로 커버)
-    # 예: 금(4/10) → [4/10, 4/11, 4/12] → 4/10 22시~4/13 22시 커버
-    all_dates = [base_date]
-    tomorrow = base_date + timedelta(days=1)
-    if _is_holiday(tomorrow):
-        all_dates.append(tomorrow)
-        d = tomorrow
-        while True:
-            next_d = d + timedelta(days=1)
-            if _is_holiday(next_d):
-                all_dates.append(next_d)
-                d = next_d
-            else:
-                break
-    else:
-        all_dates.append(tomorrow)
-    all_dates = sorted(set(all_dates))
+    all_dates = calc_target_dates(base_date, include_base=True)
 
     print(f"\n{'='*65}")
     print(f"  [테스트] 다중 날짜 파이프라인 - 기준일 {base_date} ({weekdays[base_date.weekday()]})")

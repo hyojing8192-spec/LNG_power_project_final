@@ -90,7 +90,7 @@ RETRY_DEADLINE_HOUR   = 23    # 최대 23시까지 재시도
 # KPX 크롤링
 # ──────────────────────────────────────────────────────────────
 
-def _fetch_kpx_table() -> list[dict] | None:
+def _fetch_kpx_table(target_date: date | None = None) -> list[dict] | None:
     """
     new.kpx.or.kr/smpInland.es 에서 최근 7일 시간별 SMP 테이블을 파싱.
 
@@ -121,7 +121,7 @@ def _fetch_kpx_table() -> list[dict] | None:
 
             # Row 0: 헤더 — 날짜 컬럼 파싱
             header_cells = rows[0].find_all(["td", "th"])
-            date_columns = _parse_header_dates(header_cells)
+            date_columns = _parse_header_dates(header_cells, reference_date=target_date)
 
             if not date_columns:
                 logger.warning("[KPX] 헤더에서 날짜 파싱 실패")
@@ -166,14 +166,14 @@ def _fetch_kpx_table() -> list[dict] | None:
     return None
 
 
-def _parse_header_dates(header_cells) -> list[dict]:
+def _parse_header_dates(header_cells, reference_date: date | None = None) -> list[dict]:
     """
     헤더 셀에서 날짜 정보 추출.
 
     헤더 예시: ['구분', '04.01(화)', '04.02(수)', ..., '04.07(월)']
     → [{col_idx: 1, date_str: "2026-04-01"}, ...]
     """
-    today = date.today()
+    today = reference_date or date.today()
     year = today.year
     results = []
 
@@ -478,7 +478,7 @@ def collect_smp(target_date: date | None = None) -> dict:
 
     # ── 2순위: KPX 웹 크롤링 (과거데이터 백필용) ──────────────────
     logger.info(f"[수집] {date_str} KPX 크롤링 시도...")
-    table_data = _fetch_kpx_table()
+    table_data = _fetch_kpx_table(target_date=target_date)
 
     if table_data:
         found = False
@@ -567,39 +567,6 @@ def _save_cache(path: Path, data: dict) -> None:
 # 수집 대상 날짜 산출
 # ──────────────────────────────────────────────────────────────
 
-def _get_target_dates() -> list[date]:
-    """
-    오늘 수집해야 할 미래 날짜 목록을 산출.
-
-    규칙:
-      - 항상 내일(D+1) 포함
-      - 금요일 → 토, 일, 월 (3일)
-      - 토요일 → 일, 월 (2일)
-      - 공휴일 전날 → 공휴일 + 그 다음 평일까지
-
-    예) 금요일(4/4): [4/5(토), 4/6(일), 4/7(월)]
-        수요일(4/9): [4/10(목)]
-    """
-    from config import LEGAL_HOLIDAYS
-
-    today = date.today()
-    targets = []
-
-    # 내일부터 시작해서, 연속된 주말/공휴일을 넘어선 첫 평일까지 포함
-    d = today + timedelta(days=1)
-    while True:
-        targets.append(d)
-        next_d = d + timedelta(days=1)
-        # 다음날이 주말 또는 공휴일이면 계속 추가
-        if next_d.weekday() >= 5 or next_d in LEGAL_HOLIDAYS:
-            d = next_d
-        else:
-            # 현재 d 자체가 주말/공휴일이면 그 다음 평일도 포함
-            if d.weekday() >= 5 or d in LEGAL_HOLIDAYS:
-                targets.append(next_d)
-            break
-
-    return sorted(set(targets))
 
 
 def _is_cached(target_date: date) -> bool:
@@ -633,7 +600,8 @@ def run_scheduled() -> list[dict]:
     Returns:
         수집된 날짜별 결과 리스트
     """
-    all_targets = _get_target_dates()
+    from date_utils import calc_target_dates
+    all_targets = calc_target_dates(date.today(), include_base=False)
     logger.info(f"[스케줄] 수집 대상 날짜: {[d.strftime('%m/%d') for d in all_targets]}")
 
     # 이미 수집 완료된 날짜 제외
@@ -799,7 +767,8 @@ def main():
 
     elif args.now:
         # 대상 날짜 전부 즉시 수집
-        targets = _get_target_dates()
+        from date_utils import calc_target_dates
+        targets = calc_target_dates(date.today(), include_base=False)
         logger.info(f"SMP 즉시 수집 — 대상: {[d.strftime('%m/%d') for d in targets]}")
         results = [collect_smp(d) for d in targets]
         print("\n" + "=" * 55)
@@ -809,7 +778,8 @@ def main():
 
     else:
         # 스케줄 모드 (17:30~23:00 자동 수집)
-        targets = _get_target_dates()
+        from date_utils import calc_target_dates
+        targets = calc_target_dates(date.today(), include_base=False)
         logger.info(f"SMP 스케줄 수집 — 대상: {[d.strftime('%m/%d') for d in targets]}")
         results = run_scheduled()
         print("\n" + "=" * 55)
