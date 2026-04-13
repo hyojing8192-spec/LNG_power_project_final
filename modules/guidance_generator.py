@@ -64,15 +64,27 @@ def generate_hourly_plan(
         # BEP와 경제성 추출
         bep_val = None
         econ_val = 0.0
-        for label in ["1기", "2기저부하", "2기"]:
-            if best_mode == label:
+        if best_mode in ("1기", "2기저부하", "2기"):
+            bep_col = f"BEP_{best_mode}($/MMBtu)"
+            econ_col = f"경제성(억)_{best_mode}"
+            if bep_col in row:
+                bep_val = row[bep_col]
+            if econ_col in row:
+                econ_val = row[econ_col]
+        elif best_mode == "정지":
+            # 정지여도 가장 BEP가 높은 모드의 값을 표시
+            best_bep = None
+            best_econ = 0.0
+            for label in ["2기저부하", "1기", "2기"]:
                 bep_col = f"BEP_{label}($/MMBtu)"
                 econ_col = f"경제성(억)_{label}"
-                if bep_col in row:
-                    bep_val = row[bep_col]
-                if econ_col in row:
-                    econ_val = row[econ_col]
-                break
+                v = row.get(bep_col)
+                if v is not None and v == v:  # not NaN
+                    if best_bep is None or v > best_bep:
+                        best_bep = v
+                        best_econ = row.get(econ_col, 0.0)
+            bep_val = best_bep
+            econ_val = best_econ
 
         # 가동 판단 및 비고
         if best_mode == "정지":
@@ -623,12 +635,14 @@ def _summarize_mode_ranges(hourly_plan: list[dict], hours: list[int]) -> list[st
 def format_kakao_message_multi(
     base_date: date,
     daily_results: list[dict],
+    last_next_day_plan: list[dict] | None = None,
 ) -> str:
     """
     다중 날짜 카카오톡 메시지 생성.
 
     Args:
         base_date: 기준일 (조회하는 날)
+        last_next_day_plan: 마지막 날짜 D+1의 hourly_plan (별도 분석 결과)
         daily_results: [{date, hourly_plan, daily_summary}, ...] 날짜순 정렬
 
     포맷:
@@ -644,31 +658,53 @@ def format_kakao_message_multi(
     if not daily_results:
         return ""
 
-    first_date = base_date
-    last_date = daily_results[-1]["date"]
+    first_date = daily_results[0]["date"]
+    last_cover = daily_results[-1]["date"] + timedelta(days=1)  # 마지막 분석의 D+1 주간까지
 
     m1, d1 = first_date.month, first_date.day
-    m2, d2 = last_date.month, last_date.day
+    m2, d2 = last_cover.month, last_cover.day
 
     lines = []
     lines.append(f"안녕하십니까, {m1}월{d1}일 야간~{m2}월{d2}일 LNG발전 가동계획 안내드립니다.")
 
+    night_hours = list(range(22, 24)) + list(range(0, 8))
+    day_hours = list(range(8, 22))
+
     for i, result in enumerate(daily_results):
         target_d = result["date"]
         plan = result["hourly_plan"]
-        prev_d = target_d - timedelta(days=1)
+        next_d = target_d + timedelta(days=1)
 
-        night_hours = list(range(22, 24)) + list(range(0, 8))
-        day_hours = list(range(8, 22))
-
-        pm, pd_ = prev_d.month, prev_d.day
         tm, td = target_d.month, target_d.day
+        nm, nd = next_d.month, next_d.day
 
-        lines.append("")
-        lines.append(f"[{pm}월{pd_}일 22시~{tm}월{td}일 08시]")
-        lines.extend(_summarize_mode_ranges(plan, night_hours))
-        lines.append(f"[{tm}월{td}일 주간(08~22시)]")
-        lines.extend(_summarize_mode_ranges(plan, day_hours))
+        if i == 0:
+            # 첫 날짜: 당일 22시~익일 08시 야간부터 시작 (전날 야간 없음)
+            lines.append("")
+            lines.append(f"[{tm}월{td}일 22시~{nm}월{nd}일 08시]")
+            lines.extend(_summarize_mode_ranges(plan, night_hours))
+        else:
+            # 이후 날짜: 당일 주간 + 당일 22시~익일 08시 야간
+            lines.append(f"[{tm}월{td}일 주간(08~22시)]")
+            lines.extend(_summarize_mode_ranges(plan, day_hours))
+            lines.append("")
+            lines.append(f"[{tm}월{td}일 22시~{nm}월{nd}일 08시]")
+            lines.extend(_summarize_mode_ranges(plan, night_hours))
+
+    # 마지막 날짜의 D+1 주간
+    last_d = daily_results[-1]["date"]
+    last_next = last_d + timedelta(days=1)
+    # 인자로 받은 D+1 plan → daily_results에서 찾기 → 폴백
+    _d1_plan = last_next_day_plan
+    if _d1_plan is None:
+        for r in daily_results:
+            if r["date"] == last_next:
+                _d1_plan = r["hourly_plan"]
+                break
+    if _d1_plan is None:
+        _d1_plan = daily_results[-1]["hourly_plan"]
+    lines.append(f"[{last_next.month}월{last_next.day}일 주간(08~22시)]")
+    lines.extend(_summarize_mode_ranges(_d1_plan, day_hours))
 
     lines.append("")
     lines.append("추가 안내드릴사항이 있으면 연락드리겠습니다.")

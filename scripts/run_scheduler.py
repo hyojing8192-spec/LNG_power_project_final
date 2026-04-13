@@ -178,20 +178,52 @@ def run_pipeline(target_date: date | None = None, lng_price: float = DEFAULT_LNG
         logger.error(f"  가이던스 생성 실패: {e}")
         return False
 
+    # ── 4-2. D+1일 분석 (메일 차트용, 대시보드 동기화) ──
+    next_day_plan = None
+    next_day_smp = None
+    next_date = target_date + timedelta(days=1)
+    try:
+        smp_next = collect_smp(next_date)
+        if smp_next.get("updated"):
+            next_day_smp = smp_next["smp"]
+            pred_next = predict_day(
+                models, next_date, next_day_smp,
+                lng_price, lng_heat, exchange_rate,
+                elec_price_fn=get_elec_price,
+            )
+            hourly_next = build_hourly_table(
+                target_date=next_date, smp_series=next_day_smp,
+                lng_price=lng_price, lng_heat=lng_heat, exchange_rate=exchange_rate,
+                pred_results=pred_next, is_spot=is_spot,
+                smp_high_threshold=thresholds["smp_high"],
+            )
+            guidance_next = generate_full_guidance(
+                target_date=next_date, hourly_df=hourly_next,
+                smp_series=next_day_smp, thresholds=thresholds,
+                lng_price=lng_price, exchange_rate=exchange_rate,
+                lng_heat=lng_heat, is_spot=is_spot,
+            )
+            next_day_plan = guidance_next["hourly_plan"]
+            logger.info(f"  D+1({next_date}) 분석 완료 → 차트/메일에 반영")
+    except Exception as e:
+        logger.info(f"  D+1({next_date}) 분석 생략: {e}")
+
     # ── 5. 메일 발송 (F6) ─────────────────────────────
     logger.info("[5/5] 메일 발송...")
     if _is_configured():
         try:
-            # F6.2 긴급 알림 (critical/warning만)
-            urgent_sent = send_urgent_alert(target_date, alerts)
+            # F6.2 긴급 알림 (critical/warning만, 이상구간 차트 포함)
+            urgent_sent = send_urgent_alert(target_date, alerts,
+                                            smp_series=smp_series, thresholds=thresholds)
             if urgent_sent:
                 logger.info("  긴급 알림 발송 완료")
 
-            # F6.1 정기 리포트 (차트 이미지 포함)
+            # F6.1 정기 리포트 (D일 22시 ~ D+1일 21시, 대시보드 동기화)
             daily_sent = send_daily_report(
                 target_date, summary, alerts, plan,
                 hourly_df, guidance["text_report"],
                 smp_series=smp_series, thresholds=thresholds,
+                next_day_plan=next_day_plan, next_day_smp=next_day_smp,
             )
             if daily_sent:
                 logger.info("  정기 리포트 발송 완료")
@@ -240,8 +272,27 @@ def run_pipeline_multi(
     if base_date is None:
         base_date = date.today()
 
-    target_dates = get_target_dates(base_date)
     weekdays_kr = ["월","화","수","목","금","토","일"]
+
+    # 분석 대상 날짜: 기준일 + 연속 휴일까지 (다음 영업일은 마지막 D+1 주간으로 커버)
+    # 기준일 포함해야 기준일 22시~익일 주간이 메일/카톡에 나옴
+    # 예: 금(4/10) → [4/10, 4/11, 4/12] → 4/10 22시~4/13 22시 커버
+    from kmos_smp_download import _is_holiday
+    target_dates = [base_date]
+    tomorrow = base_date + timedelta(days=1)
+    if _is_holiday(tomorrow):
+        target_dates.append(tomorrow)
+        d = tomorrow
+        while True:
+            next_d = d + timedelta(days=1)
+            if _is_holiday(next_d):
+                target_dates.append(next_d)
+                d = next_d
+            else:
+                break
+    else:
+        target_dates.append(tomorrow)
+    target_dates = sorted(set(target_dates))
 
     logger.info(f"===== 다중 날짜 파이프라인 시작: {base_date} ({weekdays_kr[base_date.weekday()]}) =====")
     logger.info(f"  대상 날짜: {len(target_dates)}일 - {[str(d) for d in target_dates]}")
@@ -353,8 +404,36 @@ def run_pipeline_multi(
         logger.error("분석 결과 없음. 종료.")
         return False
 
+    # 마지막 날짜 D+1 주간 분석 (카톡/메일 마지막 주간용)
+    last_next_day_plan = None
+    last_d = daily_results[-1]["date"]
+    last_next = last_d + timedelta(days=1)
+    has_next = any(r["date"] == last_next for r in daily_results)
+    if not has_next:
+        try:
+            _smp_nx = collect_smp(last_next)
+            if _smp_nx.get("updated"):
+                _pred_nx = predict_day(models, last_next, _smp_nx["smp"],
+                                       lng_price, lng_heat, exchange_rate,
+                                       elec_price_fn=get_elec_price)
+                _hdf_nx = build_hourly_table(
+                    target_date=last_next, smp_series=_smp_nx["smp"],
+                    lng_price=lng_price, lng_heat=lng_heat, exchange_rate=exchange_rate,
+                    pred_results=_pred_nx, is_spot=is_spot,
+                    smp_high_threshold=thresholds["smp_high"])
+                _g_nx = generate_full_guidance(
+                    target_date=last_next, hourly_df=_hdf_nx,
+                    smp_series=_smp_nx["smp"], thresholds=thresholds,
+                    lng_price=lng_price, exchange_rate=exchange_rate,
+                    lng_heat=lng_heat, is_spot=is_spot)
+                last_next_day_plan = _g_nx["hourly_plan"]
+                logger.info(f"  D+1({last_next}) 주간 분석 완료 → 카톡/메일 반영")
+        except Exception as e:
+            logger.info(f"  D+1({last_next}) 주간 분석 생략: {e}")
+
     # 다중 날짜 카톡 메시지 생성
-    kakao_msg = format_kakao_message_multi(base_date, daily_results)
+    kakao_msg = format_kakao_message_multi(base_date, daily_results,
+                                           last_next_day_plan=last_next_day_plan)
 
     # ── 전파 ──
     logger.info(f"\n[3] 전파 ({len(daily_results)}일치)...")
@@ -371,7 +450,8 @@ def run_pipeline_multi(
     if _is_configured() and daily_results:
         try:
             if len(daily_results) > 1:
-                send_multi_day_report(daily_results)
+                send_multi_day_report(daily_results,
+                                             last_next_day_plan=last_next_day_plan)
             else:
                 first = daily_results[0]
                 send_daily_report(

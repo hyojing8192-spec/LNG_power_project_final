@@ -225,11 +225,12 @@ if _csv_files:
         _latest_name = Path(_csv_files[-1]).stem  # 경제성분석_2026-04-10
         _latest_csv_date_str = _latest_name.replace("경제성분석_", "")
         _latest_csv_date_parsed = date.fromisoformat(_latest_csv_date_str)
-        # CSV 날짜가 영업일이면 그걸 기본값으로
-        if not _is_holiday_check(_latest_csv_date_parsed):
-            _default_date = _latest_csv_date_parsed
-        else:
-            _default_date = _prev_workday(_latest_csv_date_parsed)
+        # 미래 날짜 CSV(금요일에 미리 생성한 주말/월요일분)는 무시 → 오늘 기준 유지
+        if _latest_csv_date_parsed <= _today:
+            if not _is_holiday_check(_latest_csv_date_parsed):
+                _default_date = _latest_csv_date_parsed
+            else:
+                _default_date = _prev_workday(_latest_csv_date_parsed)
     except Exception:
         pass
 
@@ -614,9 +615,9 @@ if data_loaded and _has_real_smp:
                 f"{smp_val:.1f}" if isinstance(smp_val, (int, float)) and smp_val == smp_val else "-")
             rows["수전단가(원/kWh)"].append(f"{hourly_df['수전단가(원/kWh)'].iloc[h]:.1f}")
             rows["LNG발전 BEP($/MMBtu)"].append(
-                f"{plan[h]['bep']:.2f}" if plan[h]['bep'] else "-")
+                f"{plan[h]['bep']:.2f}" if plan[h]['bep'] is not None else "-")
             rows["경제성(억원)"].append(
-                f"{plan[h]['econ_bil']:.3f}" if plan[h]['econ_bil'] else "-")
+                f"{plan[h]['econ_bil']:.3f}" if plan[h]['econ_bil'] is not None else "-")
 
             mode = plan[h]["best_mode"]
             elec_val = hourly_df['수전단가(원/kWh)'].iloc[h]
@@ -624,6 +625,14 @@ if data_loaded and _has_real_smp:
                 rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
             elif mode in ("2기저부하", "1기"):
                 rows["대체단가(원/kWh)"].append(f"{elec_val:.1f}")
+            elif mode == "정지":
+                # 정지여도 가장 높은 BEP 모드 기준 대체단가 표시
+                # 2기 BEP가 가장 높으면 SMP 기반, 아니면 수전단가
+                bep_2gi = hourly_df.get("BEP_2기($/MMBtu)")
+                if bep_2gi is not None and h < len(bep_2gi) and bep_2gi.iloc[h] == bep_2gi.iloc[h]:
+                    rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
+                else:
+                    rows["대체단가(원/kWh)"].append(f"{elec_val:.1f}")
             else:
                 rows["대체단가(원/kWh)"].append("-")
 
@@ -705,14 +714,16 @@ if data_loaded and _has_real_smp:
                 _night_rows["최적운전모드"].append(MODE_DISPLAY.get(p["best_mode"], p["best_mode"]))
                 _night_rows["SMP(원/kWh)"].append(f"{smp_val:.1f}")
                 _night_rows["수전단가(원/kWh)"].append(f"{hourly_df['수전단가(원/kWh)'].iloc[h]:.1f}")
-                _night_rows["LNG발전 BEP($/MMBtu)"].append(f"{p['bep']:.2f}" if p['bep'] else "-")
-                _night_rows["경제성(억원)"].append(f"{p['econ_bil']:.3f}" if p['econ_bil'] else "-")
+                _night_rows["LNG발전 BEP($/MMBtu)"].append(f"{p['bep']:.2f}" if p['bep'] is not None else "-")
+                _night_rows["경제성(억원)"].append(f"{p['econ_bil']:.3f}" if p['econ_bil'] is not None else "-")
                 mode = p["best_mode"]
                 elec_val = hourly_df['수전단가(원/kWh)'].iloc[h]
                 if mode == "2기":
                     _night_rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
                 elif mode in ("2기저부하", "1기"):
                     _night_rows["대체단가(원/kWh)"].append(f"{elec_val:.1f}")
+                elif mode == "정지":
+                    _night_rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
                 else:
                     _night_rows["대체단가(원/kWh)"].append("-")
 
@@ -752,14 +763,16 @@ if data_loaded and _has_real_smp:
                 _day_rows["최적운전모드"].append(MODE_DISPLAY.get(p["best_mode"], p["best_mode"]))
                 _day_rows["SMP(원/kWh)"].append(f"{smp_val:.1f}")
                 _day_rows["수전단가(원/kWh)"].append(f"{_hourly_day['수전단가(원/kWh)'].iloc[h]:.1f}")
-                _day_rows["LNG발전 BEP($/MMBtu)"].append(f"{p['bep']:.2f}" if p['bep'] else "-")
-                _day_rows["경제성(억원)"].append(f"{p['econ_bil']:.3f}" if p['econ_bil'] else "-")
+                _day_rows["LNG발전 BEP($/MMBtu)"].append(f"{p['bep']:.2f}" if p['bep'] is not None else "-")
+                _day_rows["경제성(억원)"].append(f"{p['econ_bil']:.3f}" if p['econ_bil'] is not None else "-")
                 mode = p["best_mode"]
                 elec_val = _hourly_day['수전단가(원/kWh)'].iloc[h]
                 if mode == "2기":
                     _day_rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
                 elif mode in ("2기저부하", "1기"):
                     _day_rows["대체단가(원/kWh)"].append(f"{elec_val:.1f}")
+                elif mode == "정지":
+                    _day_rows["대체단가(원/kWh)"].append(f"{smp_val * 0.7 + elec_val * 0.3:.1f}")
                 else:
                     _day_rows["대체단가(원/kWh)"].append("-")
 
