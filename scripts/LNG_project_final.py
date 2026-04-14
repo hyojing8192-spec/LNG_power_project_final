@@ -1130,11 +1130,12 @@ if data_loaded and _has_real_smp:
 
         # D+1 SMP 공시 여부 확인 (종합화면과 동일한 로직)
         _next_date = _display_dates[1] if len(_display_dates) > 1 else None
-        _next_smp_ok = bool(_next_date and _all_smp.get(_next_date, (None, None, False))[2])
+        _next_smp_raw = _all_smp.get(_next_date, ([float('nan')]*24, "미공시", False)) if _next_date else ([float('nan')]*24, "미공시", False)
+        _next_smp_ok = bool(_next_date and _next_smp_raw[2])  # has_real — 종합장표의 _ok_day와 동일 기준
         _next_label = f"{_next_date.month}/{_next_date.day}" if _next_date else "익일"
 
         # ── D+1 SMP로 익일 가이던스 별도 생성 (종합장표와 동일한 방식) ──
-        _next_smp_list = _all_smp.get(_next_date, ([float('nan')]*24, "미공시", False))[0]
+        _next_smp_list = _next_smp_raw[0]
         _plan_next = None
         _plan_next_df = pd.DataFrame()
         _hourly_next = None
@@ -1214,6 +1215,7 @@ if data_loaded and _has_real_smp:
 
         # 22~23시: 당일 D일 SMP (항상 가용)
         TONIGHT_HOURS = list(range(22, 24))
+        st.markdown(f"**당일 {target_date.month}/{target_date.day} 22:00 ~ 23:59 (D일 SMP 기준)**")
         tonight_summary_lines = _build_period_summary(TONIGHT_HOURS, plan, smp_series)
         for line in tonight_summary_lines:
             st.markdown(f"- {line}")

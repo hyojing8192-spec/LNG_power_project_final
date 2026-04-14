@@ -234,11 +234,13 @@ active_page = st.session_state.get("active_page", "Dashboard")
 
 with col_center:
     if active_page == "Dashboard":
-        pg_dashboard.render(_ctx)
+        tab_dash, tab_guide = st.tabs(["📊 종합장표", "📋 가동 가이던스"])
+        with tab_dash:
+            pg_dashboard.render(_ctx)
+        with tab_guide:
+            pg_transaction.render(_ctx)
     elif active_page == "경제성 분석":
         pg_wallet.render(_ctx)
-    elif active_page == "가동 가이던스":
-        pg_transaction.render(_ctx)
     elif active_page == "이상구간 탐지":
         pg_anomaly.render(_ctx)
     elif active_page == "ML 모델":

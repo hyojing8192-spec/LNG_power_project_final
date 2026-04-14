@@ -9,6 +9,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from guidance_generator import generate_full_guidance
+from ml_predictor import predict_day
+from economics_engine import build_hourly_table, get_elec_price
 
 
 _WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
@@ -43,7 +45,7 @@ def render(ctx: dict) -> None:
     weekday_kr = _WEEKDAY_KR[target_date.weekday()]
     price_type = "Spot" if is_spot else "사용단가"
 
-    # ── 가이던스 생성 ───────────────────────────────────────────
+    # ── D일 가이던스 생성 ────────────────────────────────────────
     guidance = generate_full_guidance(
         target_date=target_date, hourly_df=hourly_df,
         smp_series=smp_series, thresholds=thresholds,
@@ -52,6 +54,50 @@ def render(ctx: dict) -> None:
     )
     summary = guidance["daily_summary"]
     plan = guidance["hourly_plan"]
+
+    # ── D+1 SMP 공시 여부 확인 (종합장표와 동일 기준) ───────────
+    all_smp = ctx.get("all_smp", {})
+    display_dates = ctx.get("display_dates", [target_date])
+    models = ctx.get("models", {})
+
+    _next_date = display_dates[1] if len(display_dates) > 1 else None
+    _next_smp_raw = (
+        all_smp.get(_next_date, ([float("nan")] * 24, "미공시", False))
+        if _next_date else ([float("nan")] * 24, "미공시", False)
+    )
+    _next_smp_ok = bool(_next_date and _next_smp_raw[2])
+    _next_smp_list = _next_smp_raw[0]
+    _next_label = f"{_next_date.month}/{_next_date.day}" if _next_date else "익일"
+
+    # D+1 SMP가 있는 경우에만 익일 가이던스 별도 생성
+    _plan_next = None
+    _plan_next_df = None
+    _hourly_next = None
+
+    if _next_smp_ok and _next_date:
+        try:
+            _pred_next = predict_day(
+                models, _next_date, _next_smp_list,
+                lng_price, lng_heat, exchange_rate,
+                elec_price_fn=get_elec_price,
+            )
+            _hourly_next = build_hourly_table(
+                target_date=_next_date, smp_series=_next_smp_list,
+                lng_price=lng_price, lng_heat=lng_heat,
+                exchange_rate=exchange_rate, pred_results=_pred_next,
+                is_spot=is_spot, smp_high_threshold=thresholds["smp_high"],
+            )
+            _guidance_next = generate_full_guidance(
+                target_date=_next_date, hourly_df=_hourly_next,
+                smp_series=_next_smp_list, thresholds=thresholds,
+                lng_price=lng_price, exchange_rate=exchange_rate,
+                lng_heat=lng_heat, is_spot=is_spot,
+            )
+            _plan_next = _guidance_next["hourly_plan"]
+            import pandas as _pd_tmp
+            _plan_next_df = _pd_tmp.DataFrame(_plan_next)
+        except Exception:
+            _next_smp_ok = False
 
     # ── 제목 카드 ────────────────────────────────────────────────
     st.markdown(
@@ -128,67 +174,104 @@ def render(ctx: dict) -> None:
         else:
             st.success(line)
 
-    # ── 주간 가이던스 ─────────────────────────────────────────────
     import pandas as pd
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">주간 운전 가이던스 (08:00 ~ 22:00)</div>',
-        unsafe_allow_html=True,
-    )
+    plan_df_all = pd.DataFrame(plan)   # D일 SMP — 22~23시 표시용
 
-    day_lines = _build_period_summary(DAY_HOURS, plan, smp_series)
-    for line in day_lines:
-        st.markdown(f"- {line}")
+    TONIGHT_HOURS = list(range(22, 24))   # D일 SMP
+    LATE_NIGHT_HOURS = list(range(0, 8))  # D+1 SMP 필요
 
-    plan_df_all = pd.DataFrame(plan)
-    day_plan = plan_df_all[plan_df_all["hour"].isin(DAY_HOURS)].copy()
-    day_display = day_plan[["time_str", "smp", "best_mode", "action", "bep", "econ_bil", "note"]].copy()
-    day_display.columns = ["시간", "SMP(원/kWh)", "최적모드", "판단", "BEP($/MMBtu)", "경제성(억)", "비고"]
-
-    st.dataframe(
-        day_display.style.apply(_style_action, axis=1)
-            .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
-        use_container_width=True,
-        height=min(len(DAY_HOURS) * 38 + 40, 600),
-    )
-
-    fig_day = _build_guidance_chart(
-        DAY_HOURS, plan, smp_series, hourly_df, lng_price, thresholds,
-        title="주간 (08~22시) SMP vs BEP 경제성 판단",
-    )
-    st.plotly_chart(fig_day, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ── 야간 가이던스 ─────────────────────────────────────────────
+    # ── 야간 가이던스 (먼저 표시) ─────────────────────────────────
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown(
         '<div class="section-title">야간 운전 가이던스 (22:00 ~ 익일 08:00)</div>',
         unsafe_allow_html=True,
     )
 
-    night_lines = _build_period_summary(NIGHT_HOURS, plan, smp_series)
-    for line in night_lines:
+    # 22~23시: 당일 D일 SMP (항상 가용)
+    st.markdown(
+        f"**당일 {target_date.month}/{target_date.day} 22:00 ~ 23:59 (D일 SMP 기준)**"
+    )
+    tonight_lines = _build_period_summary(TONIGHT_HOURS, plan, smp_series)
+    for line in tonight_lines:
         st.markdown(f"- {line}")
 
-    night_order = {h: i for i, h in enumerate(NIGHT_HOURS)}
-    night_plan = plan_df_all[plan_df_all["hour"].isin(NIGHT_HOURS)].copy()
-    night_plan["_sort"] = night_plan["hour"].map(night_order)
-    night_plan = night_plan.sort_values("_sort").drop(columns=["_sort"])
-    night_display = night_plan[["time_str", "smp", "best_mode", "action", "bep", "econ_bil", "note"]].copy()
-    night_display.columns = ["시간", "SMP(원/kWh)", "최적모드", "판단", "BEP($/MMBtu)", "경제성(억)", "비고"]
-
+    tonight_plan = plan_df_all[plan_df_all["hour"].isin(TONIGHT_HOURS)].copy()
+    tonight_display = tonight_plan[["time_str", "smp", "best_mode", "action", "bep", "econ_bil", "note"]].copy()
+    tonight_display.columns = ["시간", "SMP(원/kWh)", "최적모드", "판단", "BEP($/MMBtu)", "경제성(억)", "비고"]
     st.dataframe(
-        night_display.style.apply(_style_action, axis=1)
+        tonight_display.style.apply(_style_action, axis=1)
             .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
         use_container_width=True,
-        height=min(len(NIGHT_HOURS) * 38 + 40, 450),
+        height=min(len(TONIGHT_HOURS) * 38 + 40, 130),
     )
 
-    fig_night = _build_guidance_chart(
-        NIGHT_HOURS, plan, smp_series, hourly_df, lng_price, thresholds,
-        title="야간 (22시~익일08시) SMP vs BEP 경제성 판단",
-    )
+    # 00~07시: D+1 SMP 기반 (없으면 산출불가)
+    st.markdown(f"**익일 {_next_label} 00:00 ~ 08:00**")
+    if not _next_smp_ok:
+        st.info(f"⚠️ {_next_label} SMP 미공시 — 익일 새벽 가이던스 산출불가")
+    else:
+        late_night_plan = _plan_next_df[_plan_next_df["hour"].isin(LATE_NIGHT_HOURS)].copy()
+        late_night_display = late_night_plan[["time_str", "smp", "best_mode", "action", "bep", "econ_bil", "note"]].copy()
+        late_night_display.columns = ["시간", "SMP(원/kWh)", "최적모드", "판단", "BEP($/MMBtu)", "경제성(억)", "비고"]
+        st.dataframe(
+            late_night_display.style.apply(_style_action, axis=1)
+                .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
+            use_container_width=True,
+            height=min(len(LATE_NIGHT_HOURS) * 38 + 40, 350),
+        )
+
+    # 야간 차트: D+1 있으면 혼합, 없으면 22~23시만
+    if _next_smp_ok:
+        _mixed_plan = list(plan)
+        _mixed_smp = list(smp_series)
+        for _h in LATE_NIGHT_HOURS:
+            _mixed_plan[_h] = _plan_next[_h]
+            _mixed_smp[_h] = _next_smp_list[_h]
+        fig_night = _build_guidance_chart(
+            NIGHT_HOURS, _mixed_plan, _mixed_smp, hourly_df, lng_price, thresholds,
+            title=f"야간 (22시~익일08시) SMP vs BEP 경제성 판단",
+        )
+    else:
+        fig_night = _build_guidance_chart(
+            TONIGHT_HOURS, plan, smp_series, hourly_df, lng_price, thresholds,
+            title=f"야간 (22~23시) SMP vs BEP 경제성 판단 — 익일 미공시",
+        )
     st.plotly_chart(fig_night, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── 주간 가이던스 (D+1 SMP 기반) ─────────────────────────────
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="section-title">주간 운전 가이던스 (08:00 ~ 22:00)'
+        f'&nbsp;<span style="font-size:12px;font-weight:400;color:#6B7280;">'
+        f'[{_next_label} D+1 SMP]</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not _next_smp_ok:
+        st.info(f"⚠️ {_next_label} SMP 미공시 — 주간 가이던스 산출불가")
+    else:
+        day_lines = _build_period_summary(DAY_HOURS, _plan_next, _next_smp_list)
+        for line in day_lines:
+            st.markdown(f"- {line}")
+
+        day_plan = _plan_next_df[_plan_next_df["hour"].isin(DAY_HOURS)].copy()
+        day_display = day_plan[["time_str", "smp", "best_mode", "action", "bep", "econ_bil", "note"]].copy()
+        day_display.columns = ["시간", "SMP(원/kWh)", "최적모드", "판단", "BEP($/MMBtu)", "경제성(억)", "비고"]
+
+        st.dataframe(
+            day_display.style.apply(_style_action, axis=1)
+                .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
+            use_container_width=True,
+            height=min(len(DAY_HOURS) * 38 + 40, 600),
+        )
+
+        fig_day = _build_guidance_chart(
+            DAY_HOURS, _plan_next, _next_smp_list, _hourly_next, lng_price, thresholds,
+            title=f"주간 (08~22시) SMP vs BEP 경제성 판단 [{_next_label}]",
+        )
+        st.plotly_chart(fig_day, use_container_width=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── 일일 경제성 요약 ──────────────────────────────────────────
@@ -251,12 +334,72 @@ def render(ctx: dict) -> None:
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 카카오톡 메시지 ───────────────────────────────────────────
+    # ── 카카오톡/이메일 전파 ─────────────────────────────────────
     kakao_msg = guidance.get("kakao_message", "")
     if kakao_msg:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="section-title">카카오톡 전파 메시지</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">📣 전파 메시지 발송</div>', unsafe_allow_html=True)
         st.code(kakao_msg, language=None)
+
+        send_col1, send_col2 = st.columns(2)
+
+        # ── 카카오톡 발송 ─────────────────────────────────────
+        with send_col1:
+            if st.button("💬 카카오톡 발송", use_container_width=True, key="btn_kakao"):
+                try:
+                    from kakao_sender import send_kakao_guidance, KAKAO_REST_API_KEY
+                    if not KAKAO_REST_API_KEY:
+                        st.warning(
+                            "카카오 API 키 미설정\n\n"
+                            "`config.py`의 `KAKAO_REST_API_KEY`를 입력하고 "
+                            "`python kakao_sender.py --auth`로 인증하세요."
+                        )
+                    else:
+                        with st.spinner("카카오톡 발송 중..."):
+                            ok = send_kakao_guidance(kakao_msg)
+                        if ok:
+                            st.success("카카오톡 발송 완료!")
+                        else:
+                            st.error(
+                                "카카오톡 발송 실패\n\n"
+                                "토큰이 만료됐을 수 있습니다. "
+                                "`python kakao_sender.py --auth`로 재인증하세요."
+                            )
+                except Exception as _e:
+                    st.error(f"카카오톡 오류: {_e}")
+
+        # ── 이메일 발송 ───────────────────────────────────────
+        with send_col2:
+            if st.button("📧 이메일 발송", use_container_width=True, key="btn_mail"):
+                try:
+                    from mail_sender import send_daily_report, _is_configured
+                    if not _is_configured():
+                        st.warning(
+                            "메일 설정 미완료\n\n"
+                            "`config.py`의 `MAIL_SENDER_EMAIL`, "
+                            "`MAIL_SENDER_PASSWORD`, `MAIL_RECIPIENTS`를 설정하세요."
+                        )
+                    else:
+                        with st.spinner("이메일 발송 중..."):
+                            ok = send_daily_report(
+                                target_date=target_date,
+                                summary=summary,
+                                alerts=guidance.get("alerts", []),
+                                hourly_plan=plan,
+                                hourly_df=hourly_df,
+                                text_report=guidance.get("text_report", ""),
+                                smp_series=smp_series,
+                                thresholds=thresholds,
+                                next_day_plan=_plan_next,
+                                next_day_smp=_next_smp_list if _next_smp_ok else None,
+                            )
+                        if ok:
+                            st.success("이메일 발송 완료!")
+                        else:
+                            st.error("이메일 발송 실패. SMTP 설정을 확인하세요.")
+                except Exception as _e:
+                    st.error(f"이메일 오류: {_e}")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
 

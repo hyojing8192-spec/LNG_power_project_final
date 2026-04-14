@@ -66,20 +66,22 @@ def render_right_panel(config: dict) -> dict:
         key="user_target_date",
     )
 
-    # LNG 가격: 한 번 바꾸면 세션이 유지되는 동안 그 값 유지
+    # LNG 가격: 최초 1회만 기본값 설정, 이후엔 key로 session_state 자동 유지
     if "user_lng_price" not in st.session_state:
-        st.session_state.user_lng_price = float(config["default_lng_price"])
+        st.session_state["user_lng_price"] = float(config["default_lng_price"])
 
     lng_price = st.number_input(
         "LNG 가격 ($/MMBtu)",
-        value=st.session_state.user_lng_price,
         min_value=0.0,
         step=0.5,
         format="%.2f",
         key="user_lng_price",
     )
 
-    is_spot = st.checkbox("Spot LNG (제세금 +0.8$/MMBtu)", value=False, key="user_is_spot")
+    if "user_is_spot" not in st.session_state:
+        st.session_state["user_is_spot"] = False
+
+    is_spot = st.checkbox("Spot LNG (제세금 +0.8$/MMBtu)", key="user_is_spot")
 
     # 자동 산출값 표시
     st.markdown(
