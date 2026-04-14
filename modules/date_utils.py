@@ -31,22 +31,29 @@ def calc_target_dates(base_date: date, include_base: bool = False) -> list[date]
     분석 대상 날짜 계산.
 
     규칙:
-      평일(월~목, 내일이 영업일): [내일]만
+      평일(내일이 영업일):
+        include_base=True  → [오늘, 내일]
+        include_base=False → [내일]
       금요일/공휴일 전날(내일이 휴일):
-        include_base=True  → [기준일, 연속 휴일들]
-        include_base=False → [내일, 연속 휴일들]
+        include_base=True  → [오늘, 연속 휴일들, 첫 영업일]
+        include_base=False → [내일, 연속 휴일들, 첫 영업일]
+
+    예시:
+      화요일 (include_base=True)  → [화, 수]
+      금요일 (include_base=True)  → [금, 토, 일, 월]
+      연휴전날(include_base=True) → [전날, 연휴일들..., 연휴 다음 첫 영업일]
 
     Args:
         base_date    : 기준일 (보통 오늘)
-        include_base : True면 기준일 포함 (스케줄러/분석용)
-                       False면 내일부터 (수집용)
+        include_base : True면 기준일 포함 (스케줄러/파이프라인용)
+                       False면 내일부터 (수집/다운로드용)
     Returns:
         정렬된 날짜 리스트
     """
     tomorrow = base_date + timedelta(days=1)
 
     if is_holiday(tomorrow):
-        # 주말/공휴일: 기준일(옵션) + 연속 휴일
+        # 주말/공휴일: 기준일(옵션) + 연속 휴일 + 첫 영업일
         dates = []
         if include_base:
             dates.append(base_date)
@@ -58,10 +65,14 @@ def calc_target_dates(base_date: date, include_base: bool = False) -> list[date]
                 dates.append(next_d)
                 d = next_d
             else:
+                dates.append(next_d)   # ← 첫 영업일도 포함 (금→월, 연휴→복귀일)
                 break
     else:
-        # 평일: 내일만
-        dates = [tomorrow]
+        # 평일: 기준일(옵션) + 내일
+        if include_base:
+            dates = [base_date, tomorrow]
+        else:
+            dates = [tomorrow]
 
     return sorted(set(dates))
 
