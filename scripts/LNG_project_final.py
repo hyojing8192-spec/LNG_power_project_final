@@ -266,10 +266,15 @@ _display_dates = _get_display_dates(target_date)
 _display_str = ", ".join(f"{d.month}/{d.day}({_weekday_kr_map[d.weekday()]})" for d in _display_dates)
 st.sidebar.caption(f"대상 날짜: **{_display_str}**")
 
+if "lng_price" not in st.session_state:
+    st.session_state["lng_price"] = DEFAULT_LNG_PRICE
+if "is_spot" not in st.session_state:
+    st.session_state["is_spot"] = False
+
 lng_price = st.sidebar.number_input(
-    "LNG 가격 ($/MMBtu)", value=DEFAULT_LNG_PRICE, min_value=0.0, step=0.5, format="%.2f"
+    "LNG 가격 ($/MMBtu)", min_value=0.0, step=0.5, format="%.2f", key="lng_price"
 )
-is_spot = st.sidebar.checkbox("Spot LNG (제세금 0.8$/MMBtu 적용)", value=False)
+is_spot = st.sidebar.checkbox("Spot LNG (제세금 0.8$/MMBtu 적용)", key="is_spot")
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"LNG 열량: **{lng_heat}** Mcal/Nm³ (학습데이터 평균)")
