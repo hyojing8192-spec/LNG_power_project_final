@@ -406,6 +406,7 @@ def download_multi_dates(
     time.sleep(delay * 3)
 
     results = []
+    current_kmos_date = base_date  # ePower는 항상 오늘(base_date) 날짜로 열림
 
     for i, target_d in enumerate(targets):
         d_str = target_d.strftime('%Y%m%d')
@@ -417,15 +418,21 @@ def download_multi_dates(
         print(f"  파일명: {filename}")
         print(f"{'─'*50}")
 
-        # 날짜 이동: ePower는 오늘 날짜로 열림
-        # - 첫 번째가 오늘이면 화살표 안 누름
-        # - 그 외에는 화살표 1회씩 클릭
-        if i == 0 and target_d == base_date:
-            print(f"[{now_str()}] 오늘 날짜 (기본값) - 변경 없음")
+        # 날짜 이동: 현재 KMOS 화면 날짜 기준으로 클릭 횟수 계산
+        # (일부 날짜가 캐시로 필터링되면 날짜 간격이 1일 초과할 수 있음)
+        clicks_needed = (target_d - current_kmos_date).days
+        if clicks_needed == 0:
+            print(f"[{now_str()}] 현재 날짜 그대로 사용 ({target_d})")
+        elif clicks_needed > 0:
+            print(f"[{now_str()}] {target_d}로 이동 (▶ {clicks_needed}회 클릭)...")
+            for _ in range(clicks_needed):
+                pyautogui.click(*COORDS["내일_날짜_선택"])
+                time.sleep(0.5)
+            time.sleep(delay)
         else:
-            print(f"[{now_str()}] 다음 날짜로 이동 (화살표 클릭)...")
-            pyautogui.click(*COORDS["내일_날짜_선택"])
-            time.sleep(delay * 2)
+            print(f"[{now_str()}] [경고] 날짜 역행 감지 ({current_kmos_date} → {target_d}), 스킵")
+            continue
+        current_kmos_date = target_d
 
         # 조회
         print(f"[{now_str()}] 조회...")
