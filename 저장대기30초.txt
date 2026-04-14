@@ -1,7 +1,0 @@
-    print(f"[{now()}] Step 7.6: 파일 저장 대기...")
-    for i in range(30):  # 최대 30초 대기
-        if os.path.exists(save_path):
-            size = os.path.getsize(save_path)
-            if size > 0:
-                print(f"  파일 확인! ({size:,} bytes)")
-                break
