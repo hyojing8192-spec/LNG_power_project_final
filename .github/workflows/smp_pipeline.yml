@@ -1,0 +1,117 @@
+name: SMP 수집 및 가이던스 파이프라인
+
+on:
+  # 평일 17:30 KST (08:30 UTC) 자동 실행
+  schedule:
+    - cron: '30 8 * * 1-5'
+
+  # 수동 실행 (GitHub Actions UI > Run workflow)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '기준일 (YYYY-MM-DD, 비워두면 오늘)'
+        required: false
+        default: ''
+      lng_price:
+        description: 'LNG 가격 ($/MMBtu)'
+        required: false
+        default: '11.0'
+      spot:
+        description: 'Spot LNG 여부 (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  run-pipeline:
+    name: SMP 파이프라인 (재시도 포함)
+    runs-on: ubuntu-latest
+    timeout-minutes: 110   # 17:30~19:20 KST = 최대 110분
+
+    steps:
+      # ── 1. 코드 체크아웃 ───────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 캐시 파일을 push하기 위해 토큰 권한 필요
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Python 설정 ────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. 의존성 설치 ────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. SMP 파이프라인 (최대 10회 재시도, 10분 간격) ───────
+      #   17:30 KST 시작, SMP 미공시 시 10분 대기 후 재시도
+      #   19:00 KST(10:00 UTC)까지 → 최대 10회
+      - name: Run SMP pipeline with retry
+        env:
+          MAIL_SENDER_EMAIL:    ${{ secrets.MAIL_SENDER_EMAIL }}
+          MAIL_SENDER_PASSWORD: ${{ secrets.MAIL_SENDER_PASSWORD }}
+          MAIL_RECIPIENTS:      ${{ secrets.MAIL_RECIPIENTS }}
+          KAKAO_REST_API_KEY:   ${{ secrets.KAKAO_REST_API_KEY }}
+          KAKAO_CLIENT_SECRET:  ${{ secrets.KAKAO_CLIENT_SECRET }}
+          BOK_API_KEY:          ${{ secrets.BOK_API_KEY }}
+          DATA_GO_KR_API_KEY:   ${{ secrets.DATA_GO_KR_API_KEY }}
+        run: |
+          # 인수 구성
+          ARGS="--auto"
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.lng_price }}" ]; then
+            ARGS="$ARGS --lng-price ${{ github.event.inputs.lng_price }}"
+          fi
+          if [ "${{ github.event.inputs.spot }}" = "true" ]; then
+            ARGS="$ARGS --spot"
+          fi
+
+          MAX_RETRIES=10
+          SUCCESS=false
+
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo ""
+            echo "===== 시도 ${attempt}/${MAX_RETRIES} ($(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M KST')) ====="
+            if python scripts/run_scheduler.py $ARGS; then
+              echo "✅ 파이프라인 성공"
+              SUCCESS=true
+              break
+            else
+              echo "⏳ SMP 미확보 또는 파이프라인 실패"
+              if [ $attempt -lt $MAX_RETRIES ]; then
+                echo "   10분 후 재시도..."
+                sleep 600
+              fi
+            fi
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "❌ 최대 재시도 횟수 초과 — 파이프라인 실패"
+            exit 1
+          fi
+
+      # ── 5. 업데이트된 SMP 캐시를 저장소에 커밋/푸시 ──────────
+      - name: Commit & push SMP cache
+        if: success()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/smp_cache/
+          git add data/*.csv 2>/dev/null || true   # 경제성분석_YYYY-MM-DD.csv
+
+          # 변경사항이 없으면 커밋 생략
+          if git diff --staged --quiet; then
+            echo "변경된 캐시 파일 없음 — 커밋 생략"
+          else
+            KST_TIME=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')
+            git commit -m "auto: SMP 캐시 업데이트 ${KST_TIME} KST"
+            git push
+          fi

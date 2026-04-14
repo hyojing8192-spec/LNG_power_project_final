@@ -59,8 +59,16 @@ from ml_predictor import load_data, load_models, predict_day
 from guidance_generator import generate_full_guidance, format_kakao_message_multi
 from mail_sender import send_daily_report, send_multi_day_report, send_urgent_alert, _is_configured
 from kakao_sender import send_kakao_guidance
-from kmos_smp_download import get_target_dates, download_multi_dates
 from config import DEFAULT_LNG_PRICE, DEFAULT_LNG_HEAT, FALLBACK_EXCHANGE_RATE
+
+# GUI 자동화 모듈: pyautogui 없는 환경(서버/GitHub Actions)에서는 생략
+try:
+    from kmos_smp_download import get_target_dates, download_multi_dates
+    _KMOS_AVAILABLE = True
+except Exception:
+    _KMOS_AVAILABLE = False
+    def download_multi_dates(*args, **kwargs): pass  # noqa: E301
+    def get_target_dates(*args, **kwargs): return []  # noqa: E301
 
 
 def run_pipeline(target_date: date | None = None, lng_price: float = DEFAULT_LNG_PRICE, is_spot: bool = False):
@@ -581,12 +589,14 @@ def main():
         base = date.today()
         if args.date:
             base = date.fromisoformat(args.date)
-        run_pipeline_multi(base, args.lng_price, args.spot)
+        success = run_pipeline_multi(base, args.lng_price, args.spot)
+        sys.exit(0 if success else 1)
     elif args.now or args.date:
         target = date.today() + timedelta(days=1)
         if args.date:
             target = date.fromisoformat(args.date)
-        run_pipeline(target, args.lng_price, args.spot)
+        success = run_pipeline(target, args.lng_price, args.spot)
+        sys.exit(0 if success else 1)
     else:
         start_scheduler()
 
