@@ -1121,18 +1121,15 @@ if data_loaded and _has_real_smp:
         # ══════════════════════════════════════════════════
         DAY_HOURS = list(range(8, 22))    # 08~21시
         NIGHT_HOURS = list(range(22, 24)) + list(range(0, 8))  # 22~23시, 00~07시
+        LATE_NIGHT_HOURS = list(range(0, 8))   # 00~07시 — D+1 SMP 필요
 
-        st.markdown("### 주간 운전 가이던스 (08:00 ~ 22:00)")
+        # D+1 SMP 공시 여부 확인 (종합화면과 동일한 로직)
+        _next_date = _display_dates[1] if len(_display_dates) > 1 else None
+        _next_smp_ok = bool(_next_date and _all_smp.get(_next_date, (None, None, False))[2])
+        _next_label = f"{_next_date.month}/{_next_date.day}" if _next_date else "익일"
 
-        day_summary_lines = _build_period_summary(DAY_HOURS, plan, smp_series)
-        for line in day_summary_lines:
-            st.markdown(f"- {line}")
-
-        # 주간 가동계획표
+        # 공통 DataFrame 및 스타일 함수 (조건 블록 외부에서 정의)
         plan_df_all = pd.DataFrame(plan)
-        day_plan = plan_df_all[plan_df_all["hour"].isin(DAY_HOURS)].copy()
-        day_display = day_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
-        day_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
 
         def _style_action(row):
             action = row["판단"]
@@ -1144,21 +1141,35 @@ if data_loaded and _has_real_smp:
                 return ["background-color: #cce5ff"] * len(row)
             return [""] * len(row)
 
-        st.dataframe(
-            day_display.style
-                .apply(_style_action, axis=1)
-                .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
-            use_container_width=True,
-            height=min(len(DAY_HOURS) * 38 + 40, 600),
-        )
+        st.markdown("### 주간 운전 가이던스 (08:00 ~ 22:00)")
 
-        # 주간 차트
-        fig_day = _build_guidance_chart(
-            DAY_HOURS, plan, smp_series, hourly_df,
-            lng_price, thresholds,
-            title=f"주간 (08~22시) SMP vs BEP 경제성 판단",
-        )
-        st.plotly_chart(fig_day, use_container_width=True)
+        if not _next_smp_ok:
+            st.info(f"⚠️ {_next_label} SMP 미공시 — 주간 가이던스 산출불가")
+        else:
+            day_summary_lines = _build_period_summary(DAY_HOURS, plan, smp_series)
+            for line in day_summary_lines:
+                st.markdown(f"- {line}")
+
+            # 주간 가동계획표
+            day_plan = plan_df_all[plan_df_all["hour"].isin(DAY_HOURS)].copy()
+            day_display = day_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
+            day_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
+
+            st.dataframe(
+                day_display.style
+                    .apply(_style_action, axis=1)
+                    .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
+                use_container_width=True,
+                height=min(len(DAY_HOURS) * 38 + 40, 600),
+            )
+
+            # 주간 차트
+            fig_day = _build_guidance_chart(
+                DAY_HOURS, plan, smp_series, hourly_df,
+                lng_price, thresholds,
+                title=f"주간 (08~22시) SMP vs BEP 경제성 판단",
+            )
+            st.plotly_chart(fig_day, use_container_width=True)
 
         st.markdown("---")
 
@@ -1167,30 +1178,43 @@ if data_loaded and _has_real_smp:
         # ══════════════════════════════════════════════════
         st.markdown("### 야간 운전 가이던스 (22:00 ~ 익일 08:00)")
 
-        night_summary_lines = _build_period_summary(NIGHT_HOURS, plan, smp_series)
-        for line in night_summary_lines:
+        # 22~23시: 당일 SMP (항상 가용) — D+1 여부와 무관하게 표시
+        TONIGHT_HOURS = list(range(22, 24))
+        tonight_summary_lines = _build_period_summary(TONIGHT_HOURS, plan, smp_series)
+        for line in tonight_summary_lines:
             st.markdown(f"- {line}")
 
-        # 야간 가동계획표
-        night_plan = plan_df_all[plan_df_all["hour"].isin(NIGHT_HOURS)].copy()
-        # 정렬: 22,23,0,1,...,7 순서
-        night_order = {h: i for i, h in enumerate(NIGHT_HOURS)}
-        night_plan["_sort"] = night_plan["hour"].map(night_order)
-        night_plan = night_plan.sort_values("_sort").drop(columns=["_sort"])
-        night_display = night_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
-        night_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
-
+        tonight_plan = plan_df_all[plan_df_all["hour"].isin(TONIGHT_HOURS)].copy()
+        tonight_display = tonight_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
+        tonight_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
         st.dataframe(
-            night_display.style
+            tonight_display.style
                 .apply(_style_action, axis=1)
                 .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
             use_container_width=True,
-            height=min(len(NIGHT_HOURS) * 38 + 40, 450),
+            height=min(len(TONIGHT_HOURS) * 38 + 40, 160),
         )
 
-        # 야간 차트
+        # 00~07시: D+1 SMP 필요
+        st.markdown("**익일 00:00 ~ 08:00**")
+        if not _next_smp_ok:
+            st.info(f"⚠️ {_next_label} SMP 미공시 — 익일 새벽 가이던스 산출불가")
+        else:
+            late_night_plan = plan_df_all[plan_df_all["hour"].isin(LATE_NIGHT_HOURS)].copy()
+            late_night_display = late_night_plan[["time_str","smp","best_mode","action","bep","econ_bil","note"]].copy()
+            late_night_display.columns = ["시간","SMP(원/kWh)","최적모드","판단","BEP($/MMBtu)","경제성(억)","비고"]
+            st.dataframe(
+                late_night_display.style
+                    .apply(_style_action, axis=1)
+                    .format({"SMP(원/kWh)": "{:.1f}", "BEP($/MMBtu)": "{:.2f}", "경제성(억)": "{:.3f}"}, na_rep="-"),
+                use_container_width=True,
+                height=min(len(LATE_NIGHT_HOURS) * 38 + 40, 350),
+            )
+
+        # 야간 차트 (22~23시만, 또는 D+1 가용 시 전체)
+        chart_night_hours = TONIGHT_HOURS if not _next_smp_ok else NIGHT_HOURS
         fig_night = _build_guidance_chart(
-            NIGHT_HOURS, plan, smp_series, hourly_df,
+            chart_night_hours, plan, smp_series, hourly_df,
             lng_price, thresholds,
             title=f"야간 (22시~익일08시) SMP vs BEP 경제성 판단",
         )

@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LNG-OPT — 최적 가이던스</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <!-- ApexCharts CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.49.0/dist/apexcharts.min.js"></script>
+</head>
+<body>
+
+<!-- 배경 블롭 -->
+<div class="bg-blob bg-blob-1"></div>
+<div class="bg-blob bg-blob-2"></div>
+
+<div class="app-shell">
+
+  <!-- ══════ 사이드바 ══════ -->
+  <aside class="sidebar">
+    <!-- 로고 -->
+    <div class="sidebar-logo">
+      <div class="logo-icon">⚡</div>
+      <div>
+        <div class="logo-text">LNG-OPT</div>
+        <div class="logo-sub">최적 가이던스 시스템</div>
+      </div>
+    </div>
+
+    <!-- 네비게이션 -->
+    <div class="nav-section">MAIN MENU</div>
+
+    <div class="nav-item active" data-page="dashboard">
+      <span class="nav-icon">🏠</span>
+      <span class="nav-text">Dashboard</span>
+    </div>
+    <div class="nav-item" data-page="econ">
+      <span class="nav-icon">💰</span>
+      <span class="nav-text">경제성 분석</span>
+    </div>
+    <div class="nav-item" data-page="guidance">
+      <span class="nav-icon">📋</span>
+      <span class="nav-text">가동 가이던스</span>
+    </div>
+    <div class="nav-item" data-page="anomaly">
+      <span class="nav-icon">🔍</span>
+      <span class="nav-text">이상구간 탐지</span>
+    </div>
+
+    <div class="nav-section" style="margin-top:12px;">ANALYTICS</div>
+
+    <div class="nav-item" data-page="ml">
+      <span class="nav-icon">🤖</span>
+      <span class="nav-text">ML 모델</span>
+    </div>
+    <div class="nav-item" data-page="rawdata">
+      <span class="nav-icon">📁</span>
+      <span class="nav-text">원시 데이터</span>
+    </div>
+
+    <!-- 하단 리포트 카드 -->
+    <div class="sidebar-footer">
+      <div class="report-card">
+        <div class="rc-icon">📊</div>
+        <div class="rc-title">일일 리포트</div>
+        <div class="rc-sub">가이던스 탭에서 다운로드</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════ 메인 콘텐츠 ══════ -->
+  <main class="main-content">
+
+    <!-- 오류 표시 -->
+    <div id="main-error" class="alert alert-error" style="display:none;margin-bottom:16px;"></div>
+
+    <!-- ────── Dashboard 페이지 ────── -->
+    <div id="page-dashboard" class="page">
+
+      <!-- 미공시 카드 -->
+      <div id="unavail-block" style="display:none;"></div>
+
+      <div id="dashboard-block">
+
+        <!-- Primary Card + KPI 2열 -->
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:16px;margin-bottom:20px;">
+
+          <!-- Primary Card -->
+          <div class="primary-card">
+            <div class="pc-label">LNG발전 경제성 판단</div>
+            <div class="pc-value" id="pc-value">-- 원/kWh</div>
+            <div class="pc-sub" id="pc-sub">평균 SMP</div>
+            <div id="pc-threshold" style="font-size:11px;opacity:0.65;margin-top:6px;"></div>
+            <div class="pc-row">
+              <div class="pc-stat">
+                <div class="ps-label">LNG 가격</div>
+                <div class="ps-val" id="pc-lng">--</div>
+              </div>
+              <div class="pc-stat" style="text-align:right;">
+                <div class="ps-label">환율</div>
+                <div class="ps-val" id="pc-rate">--</div>
+              </div>
+            </div>
+            <div style="margin-top:10px;font-size:11px;opacity:0.75;" id="pc-title">--</div>
+          </div>
+
+          <!-- KPI 2×2 -->
+          <div class="kpi-grid">
+            <div class="kpi-card" id="kpi-lng">
+              <div class="kpi-icon"></div>
+              <div class="kpi-val"></div>
+              <div class="kpi-lbl"></div>
+              <div class="kpi-badge"></div>
+            </div>
+            <div class="kpi-card" id="kpi-rate">
+              <div class="kpi-icon"></div>
+              <div class="kpi-val"></div>
+              <div class="kpi-lbl"></div>
+              <div class="kpi-badge"></div>
+            </div>
+            <div class="kpi-card" id="kpi-smp">
+              <div class="kpi-icon"></div>
+              <div class="kpi-val"></div>
+              <div class="kpi-lbl"></div>
+              <div class="kpi-badge"></div>
+            </div>
+            <div class="kpi-card" id="kpi-econ">
+              <div class="kpi-icon"></div>
+              <div class="kpi-val"></div>
+              <div class="kpi-lbl"></div>
+              <div class="kpi-badge"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 종합 차트 -->
+        <div class="glass-card" style="margin-bottom:20px;">
+          <div class="section-hdr">
+            <span class="section-title">SMP vs LNG발전 BEP vs LNG가격</span>
+            <span class="section-sub" style="font-size:11px;color:#6B7280;">
+              (좌축: 원/kWh  /  우축: $/MMBtu)
+            </span>
+          </div>
+          <div id="chart-main"></div>
+        </div>
+
+        <!-- 가동계획 테이블 -->
+        <div class="glass-card">
+          <div class="section-hdr">
+            <span class="section-title">⏱ 시간별 가동계획</span>
+          </div>
+          <div id="plan-tables"></div>
+        </div>
+
+      </div><!-- /dashboard-block -->
+    </div><!-- /page-dashboard -->
+
+
+    <!-- ────── 경제성 분석 페이지 ────── -->
+    <div id="page-econ" class="page" style="display:none;">
+      <div class="primary-card" style="margin-bottom:20px;">
+        <div style="font-size:18px;font-weight:700;margin-bottom:4px;">📈 경제성 분석</div>
+        <div style="font-size:13px;opacity:0.85;" id="econ-subtitle">-- 기준 24시간 경제성 분석</div>
+      </div>
+
+      <!-- KPI 4개 -->
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        <div class="kpi-card">
+          <div class="kpi-icon">📊</div>
+          <div class="kpi-val" id="econ-avg-smp">--</div>
+          <div class="kpi-lbl">평균 SMP (원/kWh)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon">📉</div>
+          <div class="kpi-val" id="econ-bep-low">--</div>
+          <div class="kpi-lbl">LNG발전 BEP 임계 (원/kWh)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon">📈</div>
+          <div class="kpi-val" id="econ-bep-high">--</div>
+          <div class="kpi-lbl">기력발전 BEP 임계 (원/kWh)</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon">🏆</div>
+          <div class="kpi-val" id="econ-top-mode">--</div>
+          <div class="kpi-lbl">최다 최적모드</div>
+        </div>
+      </div>
+
+      <!-- SMP 시계열 차트 -->
+      <div class="glass-card" style="margin-bottom:20px;">
+        <div class="section-hdr">
+          <span class="section-title">시간별 SMP 및 BEP 임계선</span>
+        </div>
+        <div id="chart-econ-smp"></div>
+      </div>
+
+      <!-- 24시간 경제성 상세 테이블 -->
+      <div class="glass-card">
+        <div class="section-hdr">
+          <span class="section-title">24시간 경제성 상세 테이블</span>
+        </div>
+        <div id="econ-detail-table"></div>
+      </div>
+    </div><!-- /page-econ -->
+
+
+    <!-- ────── 가동 가이던스 페이지 ────── -->
+    <div id="page-guidance" class="page" style="display:none;">
+      <div style="margin-bottom:20px;">
+        <div class="section-title" style="font-size:20px;margin-bottom:4px;">📋 가동 가이던스</div>
+        <div class="section-sub">시간별 최적 운전 판단 및 경제성 분석</div>
+      </div>
+
+      <!-- 운전 권고 -->
+      <div class="glass-card" style="margin-bottom:16px;">
+        <div class="section-title" style="margin-bottom:12px;">🚦 종합 운전 권고</div>
+        <div id="guidance-rec"></div>
+      </div>
+
+      <!-- 야간/주간 2열 (야간 좌, 주간 우) -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div class="glass-card">
+          <div class="section-title" style="margin-bottom:12px;">🌙 야간 (22~익일08시)</div>
+          <div id="guidance-night-table"></div>
+        </div>
+        <div class="glass-card">
+          <div class="section-title" style="margin-bottom:12px;">☀️ 주간 (08~22시)</div>
+          <div id="guidance-day-table"></div>
+        </div>
+      </div>
+
+      <!-- 경제성 요약 + 모드 분포 -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div class="glass-card">
+          <div class="section-title" style="margin-bottom:12px;">🍩 운전모드 분포</div>
+          <div id="chart-mode-donut"></div>
+        </div>
+        <div class="glass-card">
+          <div class="section-title" style="margin-bottom:12px;">📊 모드별 경제성</div>
+          <div id="chart-econ-bar"></div>
+        </div>
+      </div>
+
+      <!-- 다운로드 + 카카오톡 -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="glass-card">
+          <div class="section-title" style="margin-bottom:12px;">⬇️ 다운로드</div>
+          <button class="btn btn-primary" id="btn-dl-report">📄 가이던스 텍스트 리포트</button>
+        </div>
+        <div class="glass-card">
+          <div class="section-title" style="margin-bottom:12px;">💬 카카오톡 전파 메시지</div>
+          <pre class="code-block" id="kakao-msg" style="max-height:180px;overflow-y:auto;"></pre>
+        </div>
+      </div>
+    </div><!-- /page-guidance -->
+
+
+    <!-- ────── 이상구간 탐지 ────── -->
+    <div id="page-anomaly" class="page" style="display:none;">
+      <div class="primary-card" style="margin-bottom:20px;">
+        <div style="font-size:18px;font-weight:700;margin-bottom:4px;">🔍 이상구간 탐지</div>
+        <div style="font-size:13px;opacity:0.85;">SMP 이상구간 및 경제성 급변 탐지</div>
+      </div>
+
+      <!-- KPI 3개 -->
+      <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px;">
+        <div class="kpi-card">
+          <div class="kpi-icon">⚠️</div>
+          <div class="kpi-val" id="anomaly-zero">-</div>
+          <div class="kpi-lbl">SMP 제로 건수</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon">📉</div>
+          <div class="kpi-val" id="anomaly-low">-</div>
+          <div class="kpi-lbl">SMP 경제성 한계</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon">📈</div>
+          <div class="kpi-val" id="anomaly-high">-</div>
+          <div class="kpi-lbl">SMP 과대</div>
+        </div>
+      </div>
+
+      <!-- SMP 시계열 이상구간 차트 -->
+      <div class="glass-card" style="margin-bottom:20px;">
+        <div class="section-hdr">
+          <span class="section-title">SMP 시계열 이상구간 탐지 (최근 90일)</span>
+        </div>
+        <div id="chart-anomaly" style="min-height:400px;width:100%;"></div>
+      </div>
+
+      <!-- 이상구간 상세 -->
+      <div class="glass-card" style="margin-bottom:20px;">
+        <div class="section-title" style="margin-bottom:12px;">이상구간 상세</div>
+        <div id="anomaly-table"></div>
+      </div>
+
+      <!-- 경제성 급변 탐지 -->
+      <div class="glass-card">
+        <div class="section-hdr">
+          <span class="section-title">⚡ 당일 경제성 급변 구간 탐지</span>
+        </div>
+        <div id="chart-econ-change"></div>
+        <div id="econ-change-table" style="margin-top:12px;"></div>
+      </div>
+    </div><!-- /page-anomaly -->
+
+
+    <!-- ────── ML 모델 ────── -->
+    <div id="page-ml" class="page" style="display:none;">
+      <div style="margin-bottom:20px;">
+        <div class="section-title" style="font-size:20px;margin-bottom:4px;">🤖 ML 모델 성능</div>
+        <div class="section-sub">XGBoost 기반 수출입전력·효율 예측 모델</div>
+      </div>
+      <div id="ml-content" class="glass-card"></div>
+      <div class="glass-card" style="margin-top:16px;">
+        <div class="section-title" style="margin-bottom:12px;">CV R² 시각화</div>
+        <div id="chart-ml-r2"></div>
+      </div>
+      <div style="margin-top:12px;">
+        <button class="btn btn-ghost" id="btn-retrain">🔄 모델 재학습</button>
+      </div>
+    </div><!-- /page-ml -->
+
+
+    <!-- ────── 원시 데이터 ────── -->
+    <div id="page-rawdata" class="page" style="display:none;">
+      <div style="margin-bottom:20px;">
+        <div class="section-title" style="font-size:20px;margin-bottom:4px;">📁 원시 데이터</div>
+        <div class="section-sub">학습 데이터 통계 및 미리보기</div>
+      </div>
+      <div id="rawdata-content" class="glass-card"></div>
+    </div><!-- /page-rawdata -->
+
+  </main><!-- /main-content -->
+
+
+  <!-- ══════ 우측 패널 ══════ -->
+  <aside class="right-panel">
+
+    <!-- 스케줄러 상태 -->
+    <div class="glass-card glass-card-sm">
+      <div style="font-family:'Sora',sans-serif;font-size:12px;font-weight:600;
+                  color:#1E1B4B;margin-bottom:10px;">시스템 상태</div>
+      <div class="sched-badge" id="sched-badge">
+        <span class="sched-dot" id="sched-dot" style="background:#6B7280;"></span>
+        <span id="sched-label" style="color:#6B7280;">확인중...</span>
+      </div>
+    </div>
+
+    <!-- 분석 설정 -->
+    <div class="glass-card glass-card-sm">
+      <div style="font-family:'Sora',sans-serif;font-size:12px;font-weight:600;
+                  color:#1E1B4B;margin-bottom:12px;">⚙️ 분석 설정</div>
+
+      <div class="input-group" style="margin-bottom:10px;">
+        <label>분석 기준일</label>
+        <input type="date" id="input-date">
+      </div>
+      <div class="input-group" style="margin-bottom:10px;">
+        <label>LNG 가격 ($/MMBtu)</label>
+        <input type="number" id="input-lng-price" value="13.5" step="0.5" min="0">
+      </div>
+      <div class="toggle-wrap" style="margin-bottom:14px;" onclick="toggleSpot()">
+        <div class="toggle-track" id="spot-track">
+          <div class="toggle-thumb"></div>
+        </div>
+        <span class="toggle-label">Spot LNG (제세금 +0.8$/MMBtu)</span>
+        <input type="checkbox" id="input-spot">
+      </div>
+
+      <button class="btn btn-primary" style="width:100%;" id="btn-analyze"
+              onclick="runAnalysis()">▶  분석 실행</button>
+    </div>
+
+    <!-- 자동 산출값 -->
+    <div class="glass-card glass-card-sm" style="font-size:12px;color:#6B7280;line-height:2;">
+      <div style="font-family:'Sora',sans-serif;font-size:12px;font-weight:600;
+                  color:#1E1B4B;margin-bottom:8px;">자동 산출</div>
+      <div>🔥 LNG 열량:&nbsp;<strong style="color:#1E1B4B;" id="rp-heat">--</strong></div>
+      <div>💱 환율:&nbsp;<strong style="color:#1E1B4B;" id="rp-rate">--</strong></div>
+    </div>
+
+    <!-- SMP 수집 현황 -->
+    <div class="glass-card glass-card-sm">
+      <div style="font-family:'Sora',sans-serif;font-size:12px;font-weight:600;
+                  color:#1E1B4B;margin-bottom:10px;">📡 SMP 수집 현황</div>
+      <div id="smp-status-list"></div>
+    </div>
+
+  </aside><!-- /right-panel -->
+
+</div><!-- /app-shell -->
+
+<script src="/static/js/main.js?v=8"></script>
+<script>
+  // Spot 토글
+  function toggleSpot() {
+    const cb   = document.getElementById('input-spot');
+    const track = document.getElementById('spot-track');
+    cb.checked = !cb.checked;
+    track.classList.toggle('on', cb.checked);
+  }
+</script>
+</body>
+</html>
