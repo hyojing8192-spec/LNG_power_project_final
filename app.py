@@ -24,6 +24,7 @@ st.set_page_config(
 )
 
 # ── 나머지 임포트 ─────────────────────────────────────────────
+import json
 import numpy as np
 import pandas as pd
 
@@ -47,6 +48,27 @@ from components.utils import (
     prev_workday,
     weekday_kr,
 )
+# ── 사용자 설정 영속화 ────────────────────────────────────────
+_PREFS_PATH = _ROOT / "data" / "user_prefs.json"
+
+def _load_prefs() -> dict:
+    try:
+        if _PREFS_PATH.exists():
+            return json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _save_prefs(**kwargs) -> None:
+    try:
+        prefs = _load_prefs()
+        prefs.update(kwargs)
+        _PREFS_PATH.write_text(
+            json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
 import components.pages.dashboard as pg_dashboard
 import components.pages.wallet as pg_wallet
 import components.pages.transaction as pg_transaction
@@ -126,11 +148,15 @@ with col_left:
 # ══════════════════════════════════════════════════════════════
 _cached_dates = list_cached_dates()
 
-# 최초 1회만 기본 날짜 계산 (이후엔 세션 상태 유지)
+# 최초 1회만 기본값 설정 — 저장된 prefs → 없으면 기본값
 if "user_target_date" not in st.session_state:
     st.session_state.user_target_date = get_default_date(_ROOT)
 if "user_lng_price" not in st.session_state:
-    st.session_state.user_lng_price = float(DEFAULT_LNG_PRICE)
+    _prefs = _load_prefs()
+    st.session_state.user_lng_price = float(_prefs.get("lng_price", DEFAULT_LNG_PRICE))
+if "user_is_spot" not in st.session_state:
+    _prefs = _load_prefs()
+    st.session_state.user_is_spot = bool(_prefs.get("is_spot", False))
 
 with col_right:
     _panel_out = render_right_panel({
@@ -144,6 +170,9 @@ with col_right:
 target_date = _panel_out["target_date"]
 lng_price   = _panel_out["lng_price"]
 is_spot     = _panel_out["is_spot"]
+
+# 변경된 설정값을 파일에 저장 (새로고침 후에도 복원)
+_save_prefs(lng_price=lng_price, is_spot=is_spot)
 
 # 주말/공휴일 보정
 if is_holiday(target_date):
