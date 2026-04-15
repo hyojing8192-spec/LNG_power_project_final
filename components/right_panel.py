@@ -60,9 +60,9 @@ def render_right_panel(config: dict) -> dict:
     if "user_target_date" not in st.session_state:
         st.session_state.user_target_date = config["default_date"]
 
+    # key로 session_state와 연결 시 value= 중복 전달 금지 (경고 방지)
     target_date = st.date_input(
         "분석 기준일",
-        value=st.session_state.user_target_date,
         key="user_target_date",
     )
 

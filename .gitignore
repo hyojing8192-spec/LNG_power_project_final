@@ -9,3 +9,20 @@ data/kakao_token.json
 data/test_chart.png
 data/kmos_coords.json
 .omc/
+
+# 대용량 바이너리 — git 추적 제외
+*.mp4
+*.pptx
+*.lnk
+dashboard_concept.jpg
+
+# 임시/참고용 파일
+2026-*_export.csv
+smp 이상치 탐지 메일링.xlsx
+스트림릿 종합화면에 넣을 표.xlsx
+스케줄러 (매일 자동 실행).txt
+1. 머신러닝 (XGBoost) — 핵심 예측 모델.txt
+scripts/_make_script.py
+
+# 이전 버전 폴더
+과제/

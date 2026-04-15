@@ -254,12 +254,12 @@ def download_smp_from_kmos(
     pyautogui.press("enter")  # 디렉토리 이동 (저장 아님)
     time.sleep(delay * 3)  # 디렉토리 갱신 대기
 
-    # # ── Step 6.5: 파일이름 입력 ──
-    # print(f"[{now()}] Step 6.5: 파일이름 입력: {filename}")
-    # pyautogui.doubleClick(*COORDS["파일이름_입력"])  # 더블클릭으로 전체 선택
-    # time.sleep(0.5)
-    # clipboard_paste(filename)
-    # time.sleep(delay)
+    # ── Step 6.5: 파일이름 입력 ──
+    print(f"[{now()}] Step 6.5: 파일이름 입력: {filename}")
+    pyautogui.doubleClick(*COORDS["파일이름_입력"])  # 더블클릭으로 전체 선택
+    time.sleep(0.5)
+    clipboard_paste(filename)
+    time.sleep(delay)
 
     # ── Step 7: 저장 ──
     print(f"[{now()}] Step 7: 저장 버튼 클릭...")
@@ -455,6 +455,12 @@ def download_multi_dates(
         time.sleep(0.5)
         pyautogui.press("enter")
         time.sleep(delay * 3)
+
+        # 파일이름 입력
+        pyautogui.doubleClick(*COORDS["파일이름_입력"])
+        time.sleep(0.5)
+        clipboard_paste(filename)
+        time.sleep(delay)
 
         # 저장 버튼
         pyautogui.click(*COORDS["저장_버튼"])
